@@ -1,7 +1,7 @@
 'use client'
 
 import { useEffect, useState, Suspense } from 'react'
-import { supabase } from '../lib/supabaseClient'
+import { supabase } from '../lib/supabaseClient' // パスはご自身の環境に合わせてください
 import { useRouter, useSearchParams } from 'next/navigation'
 import { Scanner } from '@yudiel/react-qr-scanner'
 
@@ -23,6 +23,8 @@ function CheckInContent() {
 
     setStatus('processing')
     let token = tokenRaw
+    
+    // URL形式で読み取ってしまった場合の処理
     try {
       if (tokenRaw.includes('token=')) {
         const url = new URL(tokenRaw)
@@ -38,23 +40,30 @@ function CheckInContent() {
       return
     }
 
-    const { data: tokenData, error: tokenError } = await supabase
-      .from('event-token')
-      .select('*')
-      .eq('token', token)
+    // ★修正: テーブル名を 'event-app' に変更し、secret_code を照合
+    const { data: eventData, error: eventError } = await supabase
+      .from('event-app')
+      .select('id, name') 
+      .eq('secret_code', token)
       .single()
 
-    if (tokenError || !tokenData) {
+    // デバッグ用ログ（本番では削除してもOK）
+    if (eventError) {
+      console.log('検索エラー:', eventError)
+    }
+
+    if (eventError || !eventData) {
       setStatus('error')
-      setMessage('無効なQRコードです')
+      setMessage('無効なQRコード、または有効期限切れです')
       return
     }
 
+    // すでに参加済みかチェック
     const { data: existing } = await supabase
       .from('participations')
       .select('*')
       .eq('user_id', user.id)
-      .eq('event_id', tokenData.event_id)
+      .eq('event_id', eventData.id)
       .single()
 
     if (existing) {
@@ -63,11 +72,12 @@ function CheckInContent() {
       return
     }
 
+    // 参加データを登録
     const { error: insertError } = await supabase
       .from('participations')
       .insert({
         user_id: user.id,
-        event_id: tokenData.event_id,
+        event_id: eventData.id,
         checked_in_at: new Date().toISOString(),
       })
 

@@ -1,204 +1,173 @@
 'use client'
 
-import { useEffect, useState } from 'react'
+import { useEffect, useState, useCallback } from 'react'
 import { supabase } from '../../lib/supabaseClient'
 import { useRouter } from 'next/navigation'
 import QRCode from 'react-qr-code'
 
-// ★あなたのメールアドレス
-const ADMIN_EMAIL = 'admin@test.com' 
+const ADMIN_EMAILS = [
+  'admin@test.com', 
+  'campustocommunityshizuoka@gmail.com'
+]
 
-export default function AdminQrPage() {
+// 画像のデータに合わせて ID:1 のイベントを操作対象とします
+const EVENT_ID = 1
+
+export default function AdminQRPage() {
   const [loading, setLoading] = useState(true)
-  const [qrUrl, setQrUrl] = useState('')
-  const [token, setToken] = useState('')
-  const [eventName, setEventName] = useState('Event Check-in')
+  const [isAdmin, setIsAdmin] = useState(false)
+  const [qrValue, setQrValue] = useState('')
+  const [isUpdating, setIsUpdating] = useState(false)
   const router = useRouter()
 
-  // トークン生成ロジック
-  const createNewToken = async () => {
-    const { data: realEvent, error: fetchError } = await supabase
-      .from('event-app')
-      .select('id, name')
-      .limit(1)
-      .single()
-
-    if (fetchError || !realEvent) {
-      alert('エラー: イベントがありません')
-      return null
-    }
-
-    setEventName(realEvent.name)
-
-    const newToken = crypto.randomUUID()
-    const newId = Date.now() 
-
-    const { data, error } = await supabase
-      .from('event-token')
-      .insert({
-        id: newId,
-        token: newToken,
-        event_id: realEvent.id,
-      })
-      .select()
-      .single()
-
-    if (error) {
-      alert('更新失敗: ' + error.message)
-      return null
-    }
-    return data
+  // 今日の日付とランダムな文字列を組み合わせてコードを生成する関数
+  const generateCode = () => {
+    const today = new Date().toISOString().split('T')[0]
+    const randomSuffix = Math.random().toString(36).substring(2, 8)
+    return `event-${EVENT_ID}-${today}-${randomSuffix}`
   }
 
-  // 初期化ロジック
-  const init = async () => {
-    setLoading(true)
-    const { data: { user } } = await supabase.auth.getUser()
+  // ★重要: 生成されたQRコードをデータベース(event-app)に保存する関数
+  const saveQrToDatabase = async (code: string) => {
+    try {
+      // テーブル名を 'event-app' に修正し、実際に更新処理を行う
+      const { error } = await supabase
+        .from('event-app')
+        .update({ secret_code: code })
+        .eq('id', EVENT_ID)
+
+      if (error) throw error
+      console.log('新しいQRコードをDBに保存しました:', code)
+    } catch (error) {
+      console.error('保存エラー:', error)
+      alert('QRコードの保存に失敗しました。コンソールを確認してください。')
+      throw error
+    }
+  }
+
+  // ★追加: ページ読み込み時に、現在DBにある有効なQRコードを取得する関数
+  const fetchCurrentQr = useCallback(async () => {
+    try {
+      const { data, error } = await supabase
+        .from('event-app') // テーブル名を 'event-app' に修正
+        .select('secret_code')
+        .eq('id', EVENT_ID)
+        .single()
+
+      if (error) throw error
+
+      if (data && data.secret_code) {
+        setQrValue(data.secret_code)
+      } else {
+        // まだ値がない場合は新規生成して保存
+        const newCode = generateCode()
+        await saveQrToDatabase(newCode)
+        setQrValue(newCode)
+      }
+    } catch (error) {
+      console.error('取得エラー:', error)
+    }
+  }, [])
+
+  // QRコードの手動更新ハンドラー
+  const handleRefreshQr = async () => {
+    const confirmed = window.confirm('QRコードを更新しますか？\n以前のQRコードは無効になります。')
+    if (!confirmed) return
+
+    setIsUpdating(true)
+    const newCode = generateCode()
     
-    if (!user || user.email !== ADMIN_EMAIL) {
-      router.push('/')
-      return
+    try {
+      await saveQrToDatabase(newCode) // DB保存を待つ
+      setQrValue(newCode)             // 画面更新
+      alert('QRコードを更新しました')
+    } catch (e) {
+      // エラー処理はsaveQrToDatabase内で行済み
+    } finally {
+      setIsUpdating(false)
     }
-
-    const { data: eventData } = await supabase.from('event-app').select('name').limit(1).single()
-    if (eventData) setEventName(eventData.name)
-
-    let { data: tokenData } = await supabase
-      .from('event-token')
-      .select('*')
-      .order('created_at', { ascending: false })
-      .limit(1)
-      .single()
-
-    let shouldUseExisting = false
-    if (tokenData) {
-      const createdDate = new Date(tokenData.created_at)
-      const now = new Date()
-      const diffHours = (now.getTime() - createdDate.getTime()) / (1000 * 60 * 60)
-      if (diffHours < 24) shouldUseExisting = true
-    }
-
-    if (!shouldUseExisting) {
-      const newData = await createNewToken()
-      if (newData) tokenData = newData
-    }
-
-    if (tokenData) {
-      setToken(tokenData.token)
-      setQrUrl(`${window.location.origin}/checkin?token=${tokenData.token}`)
-    }
-    setLoading(false)
   }
 
   useEffect(() => {
-    init()
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [router])
-
-  const handleForceRefresh = async () => {
-    if (!confirm('QRコードを更新しますか？\n（古いQRコードは使用できなくなります）')) return
-    setLoading(true)
-    const newData = await createNewToken()
-    if (newData) {
-      setToken(newData.token)
-      setQrUrl(`${window.location.origin}/checkin?token=${newData.token}`)
+    const checkAdmin = async () => {
+      const { data: { user } } = await supabase.auth.getUser()
+      
+      // ユーザーが存在し、かつメールアドレスが許可リストに含まれているか確認
+      if (user && user.email && ADMIN_EMAILS.includes(user.email)) {
+        setIsAdmin(true)
+        // 権限があれば現在のコードを取得
+        await fetchCurrentQr()
+      } else {
+        router.push('/')
+      }
+      setLoading(false)
     }
-    setLoading(false)
+    checkAdmin()
+  }, [router, fetchCurrentQr])
+
+  const handleLogout = async () => {
+    await supabase.auth.signOut()
+    router.push('/login')
   }
 
-  if (loading) {
-    return (
-      <div className="min-h-[100dvh] flex items-center justify-center bg-gray-50 text-gray-600">
-        <div className="animate-pulse">Loading...</div>
-      </div>
-    )
-  }
+  if (loading) return <div className="p-10 text-center">確認中...</div>
+
+  if (!isAdmin) return null
 
   return (
-    <div className="min-h-[100dvh] bg-gray-50 flex flex-col font-sans text-gray-900">
-      
-      {/* ヘッダー: paddingを調整しスマホで圧迫感が出ないように */}
-      <header className="w-full bg-white shadow-sm border-b border-gray-200 print:hidden sticky top-0 z-10">
-        <div className="max-w-4xl mx-auto px-4 py-3 flex items-center justify-between">
-          <div className="flex items-center gap-2">
-            <img 
-              src="/logo.png" 
-              alt="Logo" 
-              className="h-8 w-auto object-contain sm:h-10"
-            />
-            <h1 className="text-base font-bold text-blue-600 tracking-wide hidden sm:block">
-              しずおかコネクト
-            </h1>
-          </div>
-          <span className="text-[10px] sm:text-xs font-medium bg-blue-50 text-blue-600 px-2 py-1 rounded-full border border-blue-100 whitespace-nowrap">
-            管理者
-          </span>
-        </div>
-      </header>
-
-      {/* メイン: スマホ用にパディングを px-4 に縮小 */}
-      <main className="flex-grow flex flex-col items-center justify-center p-4 print:p-0 print:bg-white">
+    <div className="min-h-screen bg-gray-50 flex flex-col items-center justify-center p-4 font-sans">
+      <div className="bg-white p-8 rounded-2xl shadow-xl max-w-sm w-full text-center border border-gray-100">
+        <h1 className="text-2xl font-bold text-gray-800 mb-2">管理者用QRコード</h1>
+        <p className="text-gray-500 text-sm mb-4">参加者はこのコードを読み取ります</p>
         
-        <div className="hidden print:block text-center mb-8 pt-8">
-           <img src="/logo.png" alt="Logo" className="h-16 mx-auto mb-4" />
-           <h1 className="text-3xl font-bold">イベントチェックイン</h1>
-        </div>
+        <p className="text-xs text-gray-400 font-mono mb-4 break-all bg-gray-100 p-2 rounded">
+          Current Code: {qrValue}
+        </p>
 
-        <div className="w-full max-w-md bg-white rounded-2xl shadow-xl overflow-hidden border border-gray-100 print:shadow-none print:border-none">
-          
-          <div className="bg-blue-600 p-5 text-center print:hidden">
-            <h2 className="text-xs text-blue-100 font-medium mb-1">Check-in QR Code</h2>
-            <h3 className="text-xl sm:text-2xl font-bold text-white tracking-tight break-words">
-              {eventName}
-            </h3>
-          </div>
-
-          <div className="p-6 flex flex-col items-center bg-white">
-            <p className="text-gray-600 mb-6 text-center text-sm print:text-lg print:text-black">
-              参加者の方はこちらを<br/>読み取ってください
-            </p>
-
-            {qrUrl && (
-              <div className="bg-white p-3 rounded-xl shadow-inner border border-gray-200 print:shadow-none print:border-4 print:border-black w-full max-w-[280px]">
-                <QRCode
-                  value={qrUrl}
-                  size={256}
-                  style={{ height: "auto", maxWidth: "100%", width: "100%" }}
-                  viewBox={`0 0 256 256`}
-                />
-              </div>
-            )}
-            
-            <div className="mt-4 text-[10px] text-gray-400 break-all print:hidden text-center px-4">
-              Token: {token.substring(0, 8)}...
+        <div className="bg-white p-4 rounded-xl border-2 border-dashed border-blue-200 inline-block mb-6">
+          {qrValue ? (
+            <QRCode
+              value={qrValue}
+              size={200}
+              style={{ height: "auto", maxWidth: "100%", width: "100%" }}
+              viewBox={`0 0 256 256`}
+            />
+          ) : (
+            <div className="h-[200px] w-[200px] flex items-center justify-center text-gray-300">
+              Generating...
             </div>
-          </div>
-
-          <div className="bg-gray-50 p-5 border-t border-gray-100 flex flex-col gap-3 print:hidden">
-            <button 
-              onClick={() => window.print()} 
-              className="w-full bg-slate-800 text-white py-3 rounded-lg font-bold hover:bg-slate-700 transition-colors shadow-sm flex items-center justify-center gap-2 active:scale-[0.98]"
-            >
-              <span>🖨</span> 印刷する
-            </button>
-
-            <button 
-              onClick={handleForceRefresh}
-              className="w-full bg-white border border-red-200 text-red-500 py-3 rounded-lg font-bold hover:bg-red-50 transition-colors text-sm active:scale-[0.98]"
-            >
-              🔄 QR強制更新
-            </button>
-
-            <a href="/mypage" className="text-center mt-1 text-blue-600 text-sm hover:underline py-2 block">
-              マイページへ戻る
-            </a>
-          </div>
+          )}
         </div>
 
-        <footer className="mt-6 text-gray-400 text-[10px] text-center print:fixed print:bottom-4 print:w-full">
-          &copy; Shizuoka Connect.
-        </footer>
-      </main>
+        <div className="flex flex-col gap-3">
+          <button 
+            onClick={handleRefreshQr}
+            disabled={isUpdating}
+            className="w-full py-3 bg-blue-600 text-white font-bold rounded-xl hover:bg-blue-700 transition-colors shadow-md disabled:opacity-50"
+          >
+            {isUpdating ? '更新中...' : 'QRコードを更新する'}
+          </button>
+          <p className="text-xs text-gray-400 mb-4">
+            ※更新すると以前のQRコードは無効になります
+          </p>
+
+          <div className="h-px bg-gray-200 my-2"></div>
+
+          <button 
+            onClick={() => router.push('/mypage')}
+            className="w-full py-3 bg-gray-100 text-gray-700 font-bold rounded-xl hover:bg-gray-200 transition-colors"
+          >
+            マイページへ戻る
+          </button>
+          
+          <button 
+            onClick={handleLogout}
+            className="text-sm text-gray-400 hover:text-red-500 transition-colors"
+          >
+            ログアウト
+          </button>
+        </div>
+      </div>
     </div>
   )
 }
