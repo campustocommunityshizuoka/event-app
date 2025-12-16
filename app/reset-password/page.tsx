@@ -17,7 +17,7 @@ export default function ResetPasswordPage() {
     // ★修正箇所: callbackルートを経由させる
     // 認証コードを交換してから update-password ページへ遷移させます
     const { error } = await supabase.auth.resetPasswordForEmail(email, {
-      redirectTo: `${window.location.origin}/auth/callback?next=/update-password`,
+      redirectTo: `https://event-app.shizuoka-connect.com/auth/callback?next=/update-password`, 
     })
 
     if (error) {
