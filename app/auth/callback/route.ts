@@ -37,6 +37,10 @@ export async function GET(request: Request) {
     
     if (!error) {
       return NextResponse.redirect(`${origin}${next}`)
+    }else {
+      // ▼▼▼ ここを変更：エラー内容をURLにくっつけて送る ▼▼▼
+      console.error('Auth Error:', error) // ログにも出す
+      return NextResponse.redirect(`${origin}/auth/auth-code-error?error_description=${encodeURIComponent(error.message)}`)
     }
   }
 
