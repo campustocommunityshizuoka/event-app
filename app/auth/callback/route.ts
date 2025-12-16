@@ -45,5 +45,5 @@ export async function GET(request: Request) {
   }
 
   // エラーがあった場合はトップページなどに返す
-  return NextResponse.redirect(`${origin}/auth/auth-code-error`)
+  return NextResponse.redirect(`${origin}/auth/auth-code-error?error_description=No+Code+Provided`)
 }
