@@ -3,6 +3,7 @@ import { cookies } from 'next/headers'
 import { NextResponse } from 'next/server'
 
 export const runtime = 'edge'
+
 // Supabase認証コールバック処理
 export async function GET(request: Request) {
   const { searchParams, origin } = new URL(request.url)
@@ -36,14 +37,19 @@ export async function GET(request: Request) {
     const { error } = await supabase.auth.exchangeCodeForSession(code)
     
     if (!error) {
+      // 認証成功時：指定されたページへ移動
       return NextResponse.redirect(`${origin}${next}`)
-    }else {
-      // ▼▼▼ ここを変更：エラー内容をURLにくっつけて送る ▼▼▼
-      console.error('Auth Error:', error) // ログにも出す
+    } else {
+      // 認証エラー時：エラー内容を持ってエラー画面へ
+      console.error('Auth Error:', error)
       return NextResponse.redirect(`${origin}/auth/auth-code-error?error_description=${encodeURIComponent(error.message)}`)
     }
   }
 
-  // エラーがあった場合はトップページなどに返す
-  return NextResponse.redirect(`${origin}/auth/auth-code-error?error_description=No+Code+Provided`)
+  // ▼▼▼ 修正箇所：コードがない場合の処理 ▼▼▼
+  // コードがない場合、Implicit Flow（ハッシュ形式 #access_token=...）の可能性があります。
+  // サーバーはハッシュを読めませんが、そのまま遷移先（next）へリダイレクトすることで
+  // ブラウザがハッシュを維持したまま次のページへ渡してくれます。
+  // これにより、クライアント側（update-password画面）で認証が可能になります。
+  return NextResponse.redirect(`${origin}${next}`)
 }
