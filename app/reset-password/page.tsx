@@ -14,9 +14,10 @@ export default function ResetPasswordPage() {
     setLoading(true)
     setMessage('')
 
-    // コールバックを経由せず、直接 update-password ページへ飛ばす設定
+    // ★修正箇所: callbackルートを経由させる
+    // 認証コードを交換してから update-password ページへ遷移させます
     const { error } = await supabase.auth.resetPasswordForEmail(email, {
-      redirectTo: `${window.location.origin}/update-password`,
+      redirectTo: `${window.location.origin}/auth/callback?next=/update-password`,
     })
 
     if (error) {
@@ -30,7 +31,6 @@ export default function ResetPasswordPage() {
   return (
     <div className="min-h-[100dvh] bg-gray-50 flex flex-col font-sans text-gray-900">
       
-      {/* ヘッダー: スマホ対応 (sticky) */}
       <header className="w-full bg-white shadow-sm border-b border-gray-200 sticky top-0 z-10">
         <div className="max-w-4xl mx-auto px-4 py-3 flex items-center justify-between">
           <div className="flex items-center gap-2">
@@ -49,11 +49,9 @@ export default function ResetPasswordPage() {
         </div>
       </header>
 
-      {/* メインコンテンツ */}
       <main className="flex-grow flex flex-col items-center justify-center p-4">
         <div className="w-full max-w-md bg-white rounded-2xl shadow-xl overflow-hidden border border-gray-100">
           
-          {/* カードヘッダー */}
           <div className="bg-blue-600 p-6 text-center">
             <h2 className="text-xl font-bold text-white tracking-tight">
               パスワードをお忘れの方
@@ -65,7 +63,6 @@ export default function ResetPasswordPage() {
 
           <div className="p-6 sm:p-8">
             
-            {/* メッセージ表示エリア */}
             {message && (
               <div className={`mb-6 p-4 rounded-lg text-sm border ${
                 message.includes('エラー') 
