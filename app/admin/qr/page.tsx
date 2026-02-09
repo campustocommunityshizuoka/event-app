@@ -1,173 +1,194 @@
 'use client'
 
-import { useEffect, useState, useCallback } from 'react'
-import { supabase } from '../../lib/supabaseClient'
-import { useRouter } from 'next/navigation'
+import { useEffect, useState, Suspense } from 'react' // Suspenseを追加
+import { supabase } from '@/app/lib/supabaseClient'
+import { eventSupabase } from '@/app/lib/eventDbClient'
+import { useRouter, useSearchParams } from 'next/navigation'
 import QRCode from 'react-qr-code'
 
 const ADMIN_EMAILS = [
-  'admin@test.com', 
+  'admin@test.com',
   'campustocommunityshizuoka@gmail.com'
 ]
 
-// 画像のデータに合わせて ID:1 のイベントを操作対象とします
-const EVENT_ID = 1
+// ★対象のPoster ID
+const TARGET_POSTER_ID = '5ef710d4-3583-4ff9-a010-ddec40616767'
 
-export default function AdminQRPage() {
+type ExternalEvent = {
+  id: number
+  title: string
+  event_date: string
+}
+
+function AdminQRContent() {
   const [loading, setLoading] = useState(true)
   const [isAdmin, setIsAdmin] = useState(false)
+  const [events, setEvents] = useState<ExternalEvent[]>([])
+  const [selectedEventId, setSelectedEventId] = useState<number | null>(null)
   const [qrValue, setQrValue] = useState('')
   const [isUpdating, setIsUpdating] = useState(false)
+  
   const router = useRouter()
+  const searchParams = useSearchParams()
+  const initialEventId = searchParams ? searchParams.get('id') : null
 
-  // 今日の日付とランダムな文字列を組み合わせてコードを生成する関数
-  const generateCode = () => {
-    const today = new Date().toISOString().split('T')[0]
-    const randomSuffix = Math.random().toString(36).substring(2, 8)
-    return `event-${EVENT_ID}-${today}-${randomSuffix}`
-  }
-
-  // ★重要: 生成されたQRコードをデータベース(event-app)に保存する関数
-  const saveQrToDatabase = async (code: string) => {
-    try {
-      // テーブル名を 'event-app' に修正し、実際に更新処理を行う
-      const { error } = await supabase
-        .from('event-app')
-        .update({ secret_code: code })
-        .eq('id', EVENT_ID)
-
-      if (error) throw error
-      console.log('新しいQRコードをDBに保存しました:', code)
-    } catch (error) {
-      console.error('保存エラー:', error)
-      alert('QRコードの保存に失敗しました。コンソールを確認してください。')
-      throw error
-    }
-  }
-
-  // ★追加: ページ読み込み時に、現在DBにある有効なQRコードを取得する関数
-  const fetchCurrentQr = useCallback(async () => {
-    try {
-      const { data, error } = await supabase
-        .from('event-app') // テーブル名を 'event-app' に修正
-        .select('secret_code')
-        .eq('id', EVENT_ID)
-        .single()
-
-      if (error) throw error
-
-      if (data && data.secret_code) {
-        setQrValue(data.secret_code)
-      } else {
-        // まだ値がない場合は新規生成して保存
-        const newCode = generateCode()
-        await saveQrToDatabase(newCode)
-        setQrValue(newCode)
-      }
-    } catch (error) {
-      console.error('取得エラー:', error)
-    }
-  }, [])
-
-  // QRコードの手動更新ハンドラー
-  const handleRefreshQr = async () => {
-    const confirmed = window.confirm('QRコードを更新しますか？\n以前のQRコードは無効になります。')
-    if (!confirmed) return
-
-    setIsUpdating(true)
-    const newCode = generateCode()
-    
-    try {
-      await saveQrToDatabase(newCode) // DB保存を待つ
-      setQrValue(newCode)             // 画面更新
-      alert('QRコードを更新しました')
-    } catch (e) {
-      // エラー処理はsaveQrToDatabase内で行済み
-    } finally {
-      setIsUpdating(false)
-    }
-  }
-
+  // 1. 管理者チェックとイベント一覧の取得
   useEffect(() => {
-    const checkAdmin = async () => {
+    const init = async () => {
       const { data: { user } } = await supabase.auth.getUser()
       
-      // ユーザーが存在し、かつメールアドレスが許可リストに含まれているか確認
       if (user && user.email && ADMIN_EMAILS.includes(user.email)) {
         setIsAdmin(true)
-        // 権限があれば現在のコードを取得
-        await fetchCurrentQr()
+        
+        // ★フィルタリングを追加: 指定されたposter_idのイベントのみ取得
+        const { data, error } = await eventSupabase
+          .from('events') 
+          .select('id, title, event_date') 
+          .eq('poster_id', TARGET_POSTER_ID) // 追加
+          .order('event_date', { ascending: false })
+
+        if (error) {
+          console.error('外部イベント取得エラー:', error)
+          alert('イベント情報の取得に失敗しました')
+        } else {
+          setEvents(data || [])
+          
+          // URLパラメータでIDが指定されていた場合、初期選択を行う
+          if (initialEventId) {
+            const targetId = Number(initialEventId)
+            // 取得したイベントリストの中に存在するか確認
+            if (data?.some(e => e.id === targetId)) {
+               selectEvent(targetId)
+            }
+          }
+        }
       } else {
         router.push('/')
       }
       setLoading(false)
     }
-    checkAdmin()
-  }, [router, fetchCurrentQr])
+    init()
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [router, initialEventId]) // initialEventIdの変更も監視
 
-  const handleLogout = async () => {
-    await supabase.auth.signOut()
-    router.push('/login')
+  // イベントを選択してQRコードを取得する共通処理
+  const selectEvent = async (eventId: number) => {
+    setSelectedEventId(eventId)
+    setQrValue('')
+
+    const { data } = await supabase
+      .from('event_secrets')
+      .select('secret_code')
+      .eq('event_id', eventId)
+      .single()
+
+    if (data) {
+      setQrValue(data.secret_code)
+    }
+  }
+
+  // プルダウン操作時のハンドラ
+  const handleEventSelect = (e: React.ChangeEvent<HTMLSelectElement>) => {
+    const eventId = Number(e.target.value)
+    if (eventId) {
+      selectEvent(eventId)
+    } else {
+      setSelectedEventId(null)
+      setQrValue('')
+    }
+  }
+
+  const generateNewQr = async () => {
+    if (!selectedEventId) return
+    setIsUpdating(true)
+
+    try {
+      const newSecret = `evt-${selectedEventId}-${Math.random().toString(36).substring(2, 10)}`
+
+      await supabase.from('event_secrets').delete().eq('event_id', selectedEventId)
+
+      const { error } = await supabase.from('event_secrets').insert({
+        event_id: selectedEventId,
+        secret_code: newSecret
+      })
+
+      if (error) throw error
+
+      setQrValue(newSecret)
+    } catch (error) {
+      console.error('QR生成エラー:', error)
+      alert('QRコードの保存に失敗しました')
+    } finally {
+      setIsUpdating(false)
+    }
   }
 
   if (loading) return <div className="p-10 text-center">確認中...</div>
-
   if (!isAdmin) return null
 
   return (
     <div className="min-h-screen bg-gray-50 flex flex-col items-center justify-center p-4 font-sans">
       <div className="bg-white p-8 rounded-2xl shadow-xl max-w-sm w-full text-center border border-gray-100">
-        <h1 className="text-2xl font-bold text-gray-800 mb-2">管理者用QRコード</h1>
-        <p className="text-gray-500 text-sm mb-4">参加者はこのコードを読み取ります</p>
+        <h1 className="text-xl font-bold text-gray-800 mb-6">イベントQR発行</h1>
         
-        <p className="text-xs text-gray-400 font-mono mb-4 break-all bg-gray-100 p-2 rounded">
-          Current Code: {qrValue}
-        </p>
+        <div className="mb-6 text-left">
+          <label className="block text-sm font-bold text-gray-700 mb-2">イベントを選択</label>
+          <select 
+            className="w-full p-3 border border-gray-300 rounded-lg bg-gray-50 focus:ring-2 focus:ring-blue-500"
+            onChange={handleEventSelect}
+            value={selectedEventId || ''}
+          >
+            <option value="">-- イベントを選択 --</option>
+            {events.map(ev => (
+              <option key={ev.id} value={ev.id}>
+                {ev.event_date} : {ev.title}
+              </option>
+            ))}
+          </select>
+        </div>
 
-        <div className="bg-white p-4 rounded-xl border-2 border-dashed border-blue-200 inline-block mb-6">
-          {qrValue ? (
-            <QRCode
-              value={qrValue}
-              size={200}
-              style={{ height: "auto", maxWidth: "100%", width: "100%" }}
-              viewBox={`0 0 256 256`}
-            />
-          ) : (
-            <div className="h-[200px] w-[200px] flex items-center justify-center text-gray-300">
-              Generating...
+        {selectedEventId && (
+          <div className="animate-fade-in-up">
+            <div className="bg-white p-4 rounded-xl border-2 border-dashed border-blue-200 inline-block mb-4">
+              {qrValue ? (
+                <QRCode
+                  value={qrValue}
+                  size={200}
+                  style={{ height: "auto", maxWidth: "100%", width: "100%" }}
+                  viewBox={`0 0 256 256`}
+                />
+              ) : (
+                <div className="h-[200px] w-[200px] flex items-center justify-center text-gray-400 text-sm">
+                  QR未発行
+                </div>
+              )}
             </div>
-          )}
-        </div>
 
-        <div className="flex flex-col gap-3">
-          <button 
-            onClick={handleRefreshQr}
-            disabled={isUpdating}
-            className="w-full py-3 bg-blue-600 text-white font-bold rounded-xl hover:bg-blue-700 transition-colors shadow-md disabled:opacity-50"
-          >
-            {isUpdating ? '更新中...' : 'QRコードを更新する'}
-          </button>
-          <p className="text-xs text-gray-400 mb-4">
-            ※更新すると以前のQRコードは無効になります
-          </p>
+            <button 
+              onClick={generateNewQr}
+              disabled={isUpdating}
+              className="w-full py-3 bg-blue-600 text-white font-bold rounded-xl hover:bg-blue-700 transition-colors shadow-md disabled:opacity-50 mb-4"
+            >
+              {isUpdating ? '処理中...' : (qrValue ? 'QRコードを再発行' : 'QRコードを発行')}
+            </button>
+          </div>
+        )}
 
-          <div className="h-px bg-gray-200 my-2"></div>
-
-          <button 
-            onClick={() => router.push('/mypage')}
-            className="w-full py-3 bg-gray-100 text-gray-700 font-bold rounded-xl hover:bg-gray-200 transition-colors"
-          >
-            マイページへ戻る
-          </button>
-          
-          <button 
-            onClick={handleLogout}
-            className="text-sm text-gray-400 hover:text-red-500 transition-colors"
-          >
-            ログアウト
-          </button>
-        </div>
+        <button 
+          onClick={() => router.push('/mypage')}
+          className="text-sm text-gray-500 hover:text-gray-800"
+        >
+          マイページへ戻る
+        </button>
       </div>
     </div>
+  )
+}
+
+export default function AdminQRPage() {
+  return (
+    <Suspense fallback={<div>Loading...</div>}>
+      <AdminQRContent />
+    </Suspense>
   )
 }

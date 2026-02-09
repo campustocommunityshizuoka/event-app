@@ -1,27 +1,23 @@
 'use client'
 
 import { useEffect, useState } from 'react'
-import { supabase } from '../lib/supabaseClient'
+import { supabase } from '@/app/lib/supabaseClient'
+import { eventSupabase } from '@/app/lib/eventDbClient'
 import { useRouter } from 'next/navigation'
 import Link from 'next/link'
-import { Session } from '@supabase/supabase-js'
 
-// ★管理者として許可するメールアドレス
-const ADMIN_EMAILS = [
-  'admin@test.com', 
-  'campustocommunityshizuoka@gmail.com'
-]
-
-// データ型の定義
+// --- 型定義 ---
 type Participation = {
-  id: number
   event_id: number
   checked_in_at: string
 }
 
-type EventData = {
+type ExternalEvent = {
   id: number
-  name: string
+  title: string
+  event_date: string
+  image_url: string | null
+  area: string | null
 }
 
 type HistoryItem = {
@@ -30,62 +26,99 @@ type HistoryItem = {
   time: string
 }
 
+// --- 定数 ---
+const ADMIN_EMAILS = [
+  'admin@test.com', 
+  'campustocommunityshizuoka@gmail.com'
+]
+
+// ランク定義
+const RANKS = [
+  { name: 'ビギナー', threshold: 0 },
+  { name: 'ブロンズ', threshold: 1 },
+  { name: 'シルバー', threshold: 5 },
+  { name: 'ゴールド', threshold: 10 },
+]
+
+// --- アイコンコンポーネント ---
+const Icons = {
+  Home: () => <svg xmlns="http://www.w3.org/2000/svg" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="m3 9 9-7 9 7v11a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/><polyline points="9 22 9 12 15 12 15 22"/></svg>,
+  History: () => <svg xmlns="http://www.w3.org/2000/svg" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M3 3v18h18"/><path d="M18.7 8l-5.1 5.2-2.8-2.7L7 14.3"/></svg>,
+  Camera: () => <svg xmlns="http://www.w3.org/2000/svg" width="28" height="28" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M14.5 4h-5L7 7H4a2 2 0 0 0-2 2v9a2 2 0 0 0 2 2h16a2 2 0 0 0 2-2V9a2 2 0 0 0-2-2h-3l-2.5-3z"/><circle cx="12" cy="13" r="3"/></svg>,
+  Logout: () => <svg xmlns="http://www.w3.org/2000/svg" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4"/><polyline points="16 17 21 12 16 7"/><line x1="21" x2="9" y1="12" y2="12"/></svg>,
+  Trophy: () => <svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="currentColor" stroke="none"><path d="M6 9H4.5a2.5 2.5 0 0 1 0-5H6"/><path d="M18 9h1.5a2.5 2.5 0 0 0 0-5H18"/><path d="M4 22h16"/><path d="M10 14.66V17c0 .55-.47.98-.97 1.21C7.85 18.75 7 20.24 7 22"/><path d="M14 14.66V17c0 .55.47.98.97 1.21C16.15 18.75 17 20.24 17 22"/><path d="M18 2H6v7a6 6 0 0 0 12 0V2Z"/></svg>,
+}
+
 export default function MyPage() {
   const [loading, setLoading] = useState(true)
-  const [session, setSession] = useState<Session | null>(null)
   const [userEmail, setUserEmail] = useState('')
+  const [isAdmin, setIsAdmin] = useState(false)
+  const [activeTab, setActiveTab] = useState<'home' | 'history'>('home')
+  
+  // データ
   const [history, setHistory] = useState<HistoryItem[]>([])
-  const [participationCount, setParticipationCount] = useState(0) // ★追加: 参加回数用のステート
+  const [participationCount, setParticipationCount] = useState(0)
+  const [currentRank, setCurrentRank] = useState(RANKS[0])
+  const [fetchedEvents, setFetchedEvents] = useState<ExternalEvent[]>([])
   const router = useRouter()
 
   useEffect(() => {
     const init = async () => {
-      // 1. ユーザーセッション確認
       const { data: { session } } = await supabase.auth.getSession()
       if (!session || !session.user) {
         router.push('/login')
         return
       }
-      setSession(session)
       setUserEmail(session.user.email || '')
+      
+      const adminFlag = session.user.email ? ADMIN_EMAILS.includes(session.user.email) : false
+      setIsAdmin(adminFlag)
 
-      // 2. 参加履歴の取得
-      const { data: participations, error: pError } = await supabase
-        .from('participations')
-        .select('*')
-        .eq('user_id', session.user.id)
-        .order('checked_in_at', { ascending: false })
+      // 1. 外部イベント一覧取得
+      // 修正: 開催日が近い順で、最大10件取得
+      const today = new Date().toISOString().split('T')[0]
+      const { data: eventData } = await eventSupabase
+        .from('events')
+        .select('id, title, event_date, image_url, area')
+        .gte('event_date', today)
+        .order('event_date', { ascending: true })
+        .limit(10) // ★修正: 最大10件
+      
+      setFetchedEvents(eventData || [])
 
-      if (pError) {
-        console.error('Error fetching participations:', pError)
-      } else if (participations && participations.length > 0) {
-        
-        // ★追加: 参加回数をセット
-        setParticipationCount(participations.length)
+      // 2. 参加履歴取得・ランク計算
+      if (!adminFlag) {
+        const { data: participations } = await supabase
+          .from('participations')
+          .select('event_id, checked_in_at')
+          .eq('user_id', session.user.id)
+          .order('checked_in_at', { ascending: false })
 
-        // 3. イベント情報の取得
-        const eventIds = Array.from(new Set(participations.map((p: Participation) => p.event_id)))
-        
-        // ★修正: テーブル名を 'event-app' に変更（前回の修正に合わせました）
-        const { data: events } = await supabase
-          .from('event-app') 
-          .select('id, name')
-          .in('id', eventIds)
+        if (participations) {
+          const count = participations.length
+          setParticipationCount(count)
+          
+          const rank = [...RANKS].reverse().find(r => count >= r.threshold) || RANKS[0]
+          setCurrentRank(rank)
 
-        // 4. データ結合
-        const formattedHistory: HistoryItem[] = participations.map((p: Participation) => {
-          const event = events?.find((e: EventData) => e.id === p.event_id)
-          const dateObj = new Date(p.checked_in_at)
-          return {
-            eventName: event ? event.name : 'Unknown Event',
-            date: dateObj.toLocaleDateString('ja-JP'),
-            time: dateObj.toLocaleTimeString('ja-JP', { hour: '2-digit', minute: '2-digit' }),
-          }
-        })
-        setHistory(formattedHistory)
-      } else {
-        // 参加履歴がない場合
-        setParticipationCount(0)
+          const eventIds = Array.from(new Set(participations.map((p: Participation) => p.event_id)))
+          
+          const { data: historyEventDetails } = await eventSupabase
+            .from('events') 
+            .select('id, title, event_date')
+            .in('id', eventIds)
+
+          const formattedHistory: HistoryItem[] = participations.map((p: Participation) => {
+            const event = historyEventDetails?.find((e: ExternalEvent) => e.id === p.event_id)
+            const checkInDate = new Date(p.checked_in_at)
+            return {
+              eventName: event ? event.title : `イベント (ID:${p.event_id})`,
+              date: checkInDate.toLocaleDateString('ja-JP'),
+              time: checkInDate.toLocaleTimeString('ja-JP', { hour: '2-digit', minute: '2-digit' }),
+            }
+          })
+          setHistory(formattedHistory)
+        }
       }
       setLoading(false)
     }
@@ -98,156 +131,262 @@ export default function MyPage() {
     router.push('/login')
   }
 
-  // 管理者かどうか判定する関数
-  const isAdmin = (email?: string) => {
-    if (!email) return false
-    return ADMIN_EMAILS.includes(email)
+  // プログレスバーの進捗率を計算
+  const calculateProgressWidth = () => {
+    if (participationCount < 1) return (participationCount / 1) * 33.3
+    if (participationCount < 5) return 33.3 + ((participationCount - 1) / 4) * 33.3
+    if (participationCount < 10) return 66.6 + ((participationCount - 5) / 5) * 33.3
+    return 100
   }
 
-  // --- ローディング表示 ---
-  if (loading) {
+  if (loading) return (
+    <div className="min-h-screen flex items-center justify-center bg-gray-50">
+      <div className="animate-pulse w-10 h-10 border-4 border-gray-200 border-t-blue-600 rounded-full animate-spin"></div>
+    </div>
+  )
+
+  // =========================================================
+  // ★ 管理者用ビュー
+  // =========================================================
+  if (isAdmin) {
     return (
-      <div className="min-h-[100dvh] flex items-center justify-center bg-gray-50">
-        <div className="animate-pulse flex flex-col items-center gap-2">
-          <div className="w-8 h-8 border-4 border-blue-200 border-t-blue-600 rounded-full animate-spin"></div>
-          <span className="text-gray-400 text-xs">読み込み中...</span>
-        </div>
+      <div className="min-h-screen bg-gray-50 flex flex-col font-sans text-gray-900">
+        <header className="bg-white shadow-sm sticky top-0 z-10 px-4 py-3 flex justify-between items-center">
+          <div className="flex items-center gap-2">
+            <img src="/logo.png" alt="Logo" className="h-8 w-auto object-contain" />
+            <span className="text-sm font-bold text-blue-600">管理者</span>
+          </div>
+          <button onClick={handleLogout} className="text-xs font-bold text-gray-500 hover:text-red-500">ログアウト</button>
+        </header>
+        <main className="flex-grow w-full max-w-xl mx-auto p-6">
+          <div className="bg-white rounded-xl p-6 shadow-sm border border-gray-100">
+            <h2 className="text-lg font-bold text-gray-800 mb-4">イベントQR発行</h2>
+            {fetchedEvents.length === 0 ? (
+              <p className="text-center text-gray-400 text-sm">表示可能なイベントがありません</p>
+            ) : (
+              <div className="grid gap-3">
+                {fetchedEvents.map((event) => (
+                  <Link key={event.id} href={`/admin/qr?id=${event.id}`} className="flex items-center justify-between bg-gray-50 p-4 rounded-lg hover:bg-blue-50 border border-transparent hover:border-blue-200 transition-all group">
+                    <div>
+                      <p className="text-[10px] font-bold text-blue-500">{event.event_date}</p>
+                      <h3 className="font-bold text-sm text-gray-800">{event.title}</h3>
+                    </div>
+                    <span className="text-gray-300 group-hover:text-blue-500">→</span>
+                  </Link>
+                ))}
+              </div>
+            )}
+          </div>
+        </main>
       </div>
     )
   }
 
+  // =========================================================
+  // ★ 一般参加者用ビュー
+  // =========================================================
   return (
-    <div className="min-h-[100dvh] bg-gray-50 flex flex-col font-sans text-gray-900">
+    <div className="min-h-[100dvh] bg-gray-50 font-sans text-gray-900 pb-24">
       
-      {/* ヘッダー */}
-      <header className="w-full bg-white shadow-sm border-b border-gray-200 sticky top-0 z-10">
-        <div className="max-w-4xl mx-auto px-4 py-3 flex items-center justify-between">
-          <div className="flex items-center gap-2">
-            <img src="/logo.png" alt="Logo" className="h-8 w-auto object-contain sm:h-10" />
-            <h1 className="text-base font-bold text-blue-600 tracking-wide hidden sm:block">
-              しずおかコネクト
-            </h1>
-          </div>
-          <button 
-            onClick={handleLogout}
-            className="text-[10px] font-medium text-gray-500 hover:text-red-500 border border-gray-200 px-3 py-1.5 rounded-full transition-colors active:bg-gray-100"
-          >
-            ログアウト
-          </button>
-        </div>
+      {/* アプリヘッダー */}
+      <header className="bg-white/90 backdrop-blur-md sticky top-0 z-20 px-5 py-3 flex justify-between items-center border-b border-gray-100">
+        <h1 className="text-lg font-extrabold text-blue-600 tracking-tight">しずおかコネクト</h1>
+        <button onClick={handleLogout} className="p-2 text-gray-400 hover:text-red-500 transition-colors">
+          <Icons.Logout />
+        </button>
       </header>
 
-      {/* メインコンテンツ */}
-      <main className="flex-grow w-full max-w-md mx-auto p-4 flex flex-col gap-4">
+      <main className="max-w-md mx-auto p-4">
         
-        {/* ユーザー情報と参加回数表示エリア */}
-        <div className="bg-white rounded-2xl shadow-sm border border-gray-100 p-5">
-          <div className="flex items-center gap-4 mb-4">
-            <div className="w-12 h-12 bg-gray-100 rounded-full flex items-center justify-center text-gray-500 font-bold text-xl">
-              {userEmail.charAt(0).toUpperCase()}
+        {/* --- ホームタブ --- */}
+        {activeTab === 'home' && (
+          <div className="flex flex-col gap-4 animate-fade-in-up">
+            
+            {/* 1. ユーザー情報 (シンプル化: アイコン削除) */}
+            <div className="bg-white rounded-2xl p-4 shadow-sm border border-gray-100 flex items-center justify-between">
+              <div>
+                <p className="text-[10px] text-gray-400 font-medium">Welcome back,</p>
+                <p className="text-sm font-bold text-gray-800 truncate max-w-[200px] leading-tight">
+                  {userEmail.split('@')[0]}
+                </p>
+              </div>
+              
+              {/* ランクバッジ */}
+              <div className="flex items-center gap-1.5 px-3 py-1 bg-gray-50 border border-gray-200 rounded-md">
+                <span className="text-yellow-600"><Icons.Trophy /></span>
+                <span className="text-xs font-bold text-gray-600">{currentRank.name}</span>
+              </div>
             </div>
-            <div className="flex-grow overflow-hidden">
-              <p className="text-xs text-gray-400">Account</p>
-              <p className="text-sm font-bold text-gray-800 truncate">{userEmail}</p>
-              <Link href="/update-password" className="text-[10px] text-blue-500 hover:underline">
-                 パスワード変更
-               </Link>
-            </div>
-          </div>
 
-          <div className="h-px bg-gray-100 w-full mb-4"></div>
+            {/* 2. 参加状況 & カメラ */}
+            <div className="bg-white rounded-2xl p-5 border border-gray-100 shadow-sm">
+              <div className="flex items-center justify-between gap-4 mb-6">
+                <div className="flex-grow">
+                  <p className="text-xs font-bold text-gray-400 mb-1">Total Check-ins</p>
+                  <div className="flex items-baseline gap-1">
+                    <span className="text-4xl font-extrabold text-blue-600 tracking-tight">{participationCount}</span>
+                    <span className="text-sm font-bold text-gray-500">回</span>
+                  </div>
+                </div>
 
-          {/* ★★★ 参加回数の強調表示 ★★★ */}
-          <div className="flex items-center justify-between bg-blue-50 rounded-xl p-4 border border-blue-100">
-            <div>
-              <p className="text-xs font-bold text-blue-400 uppercase tracking-wider mb-1">Total Check-ins</p>
-              <p className="text-gray-600 text-[10px]">これまでのイベント参加数</p>
-            </div>
-            <div className="flex items-baseline gap-1">
-              <span className="text-3xl font-bold text-blue-600 font-mono tracking-tighter">
-                {participationCount}
-              </span>
-              <span className="text-sm font-bold text-blue-400">回</span>
-            </div>
-          </div>
-        </div>
+                <Link 
+                  href="/checkin" 
+                  className="flex-shrink-0 w-14 h-14 bg-blue-600 rounded-2xl flex flex-col items-center justify-center text-white shadow-md hover:bg-blue-700 hover:shadow-lg hover:scale-105 active:scale-95 transition-all"
+                >
+                  <Icons.Camera />
+                </Link>
+              </div>
 
-        {/* 管理者メニュー（条件付き表示） */}
-        {isAdmin(userEmail) && (
-          <div className="animate-fade-in-up">
-            <Link 
-              href="/admin/qr"
-              className="block w-full bg-slate-800 text-white p-4 rounded-xl shadow-lg hover:bg-slate-700 transition-all active:scale-[0.98] flex items-center justify-between group"
-            >
-              <div className="flex items-center gap-3">
-                <span className="text-2xl">🔐</span>
-                <div className="text-left">
-                  <p className="text-[10px] text-slate-300 font-bold">管理者メニュー</p>
-                  <p className="text-sm font-bold">QRコード管理画面へ</p>
+              {/* プログレスバー */}
+              <div className="relative pt-2 pb-4 px-1">
+                <div className="absolute top-1/2 left-0 w-full h-1 bg-gray-100 -translate-y-1/2 rounded-full z-0"></div>
+                
+                <div 
+                  className="absolute top-1/2 left-0 h-1 bg-blue-600 -translate-y-1/2 rounded-full z-0 transition-all duration-1000 ease-out"
+                  style={{ width: `${calculateProgressWidth()}%` }}
+                ></div>
+
+                {/* ランクノード (修正: 数字を表示) */}
+                <div className="relative z-10 flex justify-between w-full">
+                  {RANKS.map((rank) => {
+                    const isReached = participationCount >= rank.threshold
+                    return (
+                      <div key={rank.name} className="flex flex-col items-center group">
+                        {/* 数字入りの丸 */}
+                        <div className={`
+                          w-6 h-6 rounded-full flex items-center justify-center text-[10px] font-bold border transition-all duration-500
+                          ${isReached 
+                            ? 'bg-blue-600 border-blue-600 text-white' 
+                            : 'bg-white border-gray-300 text-gray-400'}
+                        `}>
+                          {rank.threshold}
+                        </div>
+                        
+                        <span className={`
+                          absolute top-7 text-[9px] font-bold whitespace-nowrap mt-1 transition-colors
+                          ${isReached ? 'text-blue-600' : 'text-gray-300'}
+                        `}>
+                          {rank.name}
+                        </span>
+                      </div>
+                    )
+                  })}
                 </div>
               </div>
-              <span className="text-slate-400 group-hover:translate-x-1 transition-transform">→</span>
-            </Link>
+            </div>
+
+            {/* 3. イベント一覧 (その他のイベント) */}
+            <section className="mt-4">
+              <div className="mb-3 flex items-center justify-between px-1">
+                <h2 className="text-sm font-bold text-gray-700">その他のイベント</h2>
+              </div>
+
+              <div className="grid grid-cols-2 gap-3">
+                {fetchedEvents.map((event) => (
+                  <a 
+                    key={event.id}
+                    href="https://hamamtsu-events.shizuoka-connect.com/" 
+                    target="_blank" 
+                    rel="noopener noreferrer"
+                    className="group overflow-hidden rounded-xl bg-white shadow-sm transition-all hover:shadow-md border border-gray-100 flex flex-col"
+                  >
+                    <div className="relative w-full aspect-[4/3] bg-gray-100">
+                      {event.image_url ? (
+                        // eslint-disable-next-line @next/next/no-img-element
+                        <img 
+                          src={event.image_url} 
+                          alt={event.title}
+                          className="h-full w-full object-cover transition-transform duration-500 group-hover:scale-105"
+                        />
+                      ) : (
+                        <div className="flex h-full w-full items-center justify-center text-gray-300">
+                          <span className="text-[10px]">No Image</span>
+                        </div>
+                      )}
+                    </div>
+
+                    <div className="p-3 flex flex-col flex-grow">
+                      <span className="text-[10px] font-bold text-gray-500 bg-gray-50 px-2 py-0.5 rounded self-start mb-1.5 border border-gray-100">
+                         {new Date(event.event_date).toLocaleDateString()}
+                      </span>
+                      <h3 className="line-clamp-2 text-xs font-bold text-gray-800 leading-snug group-hover:text-blue-600 transition-colors">
+                        {event.title}
+                      </h3>
+                    </div>
+                  </a>
+                ))}
+
+                {fetchedEvents.length === 0 && (
+                   <div className="col-span-2 rounded-xl border border-dashed border-gray-200 p-8 text-center text-xs text-gray-400">
+                     現在予定されているイベントはありません
+                   </div>
+                )}
+              </div>
+            </section>
           </div>
         )}
 
-        {/* チェックインボタン */}
-        <div className="bg-gradient-to-br from-blue-600 to-blue-700 rounded-2xl shadow-lg p-6 text-center text-white relative overflow-hidden">
-          {/* 背景の装飾 */}
-          <div className="absolute -top-12 -right-12 w-40 h-40 bg-white/10 rounded-full blur-3xl"></div>
-          <div className="absolute -bottom-12 -left-12 w-40 h-40 bg-blue-400/20 rounded-full blur-3xl"></div>
-
-          <h2 className="text-lg font-bold mb-1 relative z-10">イベントに参加する</h2>
-          <p className="text-blue-100 text-xs mb-6 relative z-10">会場のQRコードを読み取ってチェックイン</p>
-          
-          <Link 
-            href="/checkin"
-            className="block w-full bg-white text-blue-600 py-3.5 rounded-xl font-bold shadow-md hover:bg-blue-50 transition-colors active:scale-[0.98] relative z-10 flex items-center justify-center gap-2"
-          >
-            <svg xmlns="http://www.w3.org/2000/svg" className="h-5 w-5" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
-              <path strokeLinecap="round" strokeLinejoin="round" d="M12 4v1m6 11h2m-6 0h-2v4m0-11v3m0 0h.01M12 14.5v.01M12 18.5v.01M12 10.5v.01M16 14.5v.01M16 18.5v.01M8 14.5v.01M8 18.5v.01M8 10.5v.01M12 6.5v.01M16 6.5v.01M8 6.5v.01" />
-            </svg>
-            カメラを起動する
-          </Link>
-        </div>
-
-        {/* 参加履歴リスト */}
-        <div className="bg-white rounded-2xl shadow-sm border border-gray-100 overflow-hidden flex-grow flex flex-col">
-          <div className="p-4 border-b border-gray-50 bg-gray-50/50">
-            <h3 className="font-bold text-gray-700 text-sm flex items-center gap-2">
-              <svg xmlns="http://www.w3.org/2000/svg" className="h-4 w-4 text-blue-500" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 8v4l3 3m6-3a9 9 0 11-18 0 9 9 0 0118 0z" />
-              </svg>
-              最近の参加履歴
-            </h3>
-          </div>
-          
-          <div className="divide-y divide-gray-50">
-            {history.length === 0 ? (
-              <div className="p-8 text-center text-gray-400 text-xs">
-                まだ参加履歴がありません
-              </div>
-            ) : (
-              history.map((item, index) => (
-                <div key={index} className="p-4 hover:bg-gray-50 transition-colors flex items-center justify-between">
-                  <div>
-                    <p className="font-bold text-gray-800 text-sm">{item.eventName}</p>
-                    <p className="text-xs text-gray-400 mt-1">{item.date}</p>
+        {/* --- 履歴タブ (既存維持) --- */}
+        {activeTab === 'history' && (
+          <div className="animate-fade-in-up">
+            <h2 className="mb-4 px-1 text-lg font-bold text-gray-800">参加履歴</h2>
+            <div className="overflow-hidden rounded-2xl border border-gray-100 bg-white shadow-sm">
+              {history.length === 0 ? (
+                <div className="flex h-64 flex-col items-center justify-center text-gray-400">
+                  <div className="mb-3 flex h-12 w-12 items-center justify-center rounded-full bg-gray-50">
+                    <Icons.History />
                   </div>
-                  <span className="text-xs font-medium text-blue-600 bg-blue-50 px-2 py-1 rounded">
-                    {item.time}
-                  </span>
+                  <p className="text-xs">履歴がありません</p>
                 </div>
-              ))
-            )}
+              ) : (
+                <div className="divide-y divide-gray-50">
+                  {history.map((item, index) => (
+                    <div key={index} className="flex items-center gap-4 p-4 transition-colors hover:bg-gray-50">
+                      <div className="flex h-12 w-12 flex-shrink-0 flex-col items-center justify-center rounded-xl bg-gray-50 text-gray-600">
+                        <span className="text-[10px] font-bold uppercase">{new Date(item.date).toLocaleString('en-US', { month: 'short' })}</span>
+                        <span className="text-lg font-bold leading-none">{new Date(item.date).getDate()}</span>
+                      </div>
+                      <div className="flex-grow">
+                        <p className="line-clamp-1 text-sm font-bold text-gray-800">{item.eventName}</p>
+                        <p className="mt-0.5 text-xs text-gray-400">
+                           {item.time} チェックイン
+                        </p>
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              )}
+            </div>
           </div>
-        </div>
-
+        )}
       </main>
 
-      <footer className="p-6 text-gray-300 text-[10px] text-center">
-        &copy; Shizuoka Connect.
-      </footer>
+      {/* ボトムナビゲーション */}
+      <nav className="fixed bottom-0 left-0 z-50 w-full border-t border-gray-100 bg-white pb-safe pt-2 shadow-[0_-4px_6px_-1px_rgba(0,0,0,0.03)]">
+        <div className="mx-auto flex h-14 max-w-md items-center justify-around px-6">
+          <button 
+            onClick={() => setActiveTab('home')}
+            className={`flex flex-col items-center gap-1 transition-colors ${activeTab === 'home' ? 'text-blue-600' : 'text-gray-400 hover:text-gray-600'}`}
+          >
+            <Icons.Home />
+            <span className="text-[10px] font-bold">ホーム</span>
+          </button>
+          
+          <Link href="/checkin" className="group relative -top-6">
+            <div className="flex h-14 w-14 items-center justify-center rounded-full bg-blue-600 text-white shadow-lg shadow-blue-500/40 transition-transform group-hover:scale-105 group-active:scale-95">
+              <svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M14.5 4h-5L7 7H4a2 2 0 0 0-2 2v9a2 2 0 0 0 2 2h16a2 2 0 0 0 2-2V9a2 2 0 0 0-2-2h-3l-2.5-3z"/><circle cx="12" cy="13" r="3"/></svg>
+            </div>
+          </Link>
+
+          <button 
+            onClick={() => setActiveTab('history')}
+            className={`flex flex-col items-center gap-1 transition-colors ${activeTab === 'history' ? 'text-blue-600' : 'text-gray-400 hover:text-gray-600'}`}
+          >
+            <Icons.History />
+            <span className="text-[10px] font-bold">履歴</span>
+          </button>
+        </div>
+      </nav>
     </div>
   )
 }

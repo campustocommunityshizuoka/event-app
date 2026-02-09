@@ -1,0 +1,2021 @@
+This file is a merged representation of the entire codebase, combined into a single document by Repomix.
+
+<file_summary>
+This section contains a summary of this file.
+
+<purpose>
+This file contains a packed representation of the entire repository's contents.
+It is designed to be easily consumable by AI systems for analysis, code review,
+or other automated processes.
+</purpose>
+
+<file_format>
+The content is organized as follows:
+1. This summary section
+2. Repository information
+3. Directory structure
+4. Repository files (if enabled)
+5. Multiple file entries, each consisting of:
+  - File path as an attribute
+  - Full contents of the file
+</file_format>
+
+<usage_guidelines>
+- This file should be treated as read-only. Any changes should be made to the
+  original repository files, not this packed version.
+- When processing this file, use the file path to distinguish
+  between different files in the repository.
+- Be aware that this file may contain sensitive information. Handle it with
+  the same level of security as you would the original repository.
+</usage_guidelines>
+
+<notes>
+- Some files may have been excluded based on .gitignore rules and Repomix's configuration
+- Binary files are not included in this packed representation. Please refer to the Repository Structure section for a complete list of file paths, including binary files
+- Files matching patterns in .gitignore are excluded
+- Files matching default ignore patterns are excluded
+- Files are sorted by Git change count (files with more changes are at the bottom)
+</notes>
+
+</file_summary>
+
+<directory_structure>
+.gitignore
+app/admin/page.tsx
+app/admin/qr/page.tsx
+app/auth/auth-code-error/page.tsx
+app/auth/callback/route.ts
+app/checkin/page.tsx
+app/favicon.ico
+app/globals.css
+app/layout.tsx
+app/lib/supabaseClient.ts
+app/login/page.tsx
+app/mypage/page.tsx
+app/page.tsx
+app/reset-password/page.tsx
+app/update-password/page.tsx
+eslint.config.mjs
+next.config.ts
+package.json
+postcss.config.mjs
+public/file.svg
+public/globe.svg
+public/logo.png
+public/next.svg
+public/vercel.svg
+public/window.svg
+README.md
+tsconfig.json
+</directory_structure>
+
+<files>
+This section contains the contents of the repository's files.
+
+<file path=".gitignore">
+# See https://help.github.com/articles/ignoring-files/ for more about ignoring files.
+
+# dependencies
+/node_modules
+/.pnp
+.pnp.*
+.yarn/*
+!.yarn/patches
+!.yarn/plugins
+!.yarn/releases
+!.yarn/versions
+
+# testing
+/coverage
+
+# next.js
+/.next/
+/out/
+
+# production
+/build
+
+# misc
+.DS_Store
+*.pem
+
+# debug
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+.pnpm-debug.log*
+
+# env files (can opt-in for committing if needed)
+.env*
+
+# vercel
+.vercel
+
+# typescript
+*.tsbuildinfo
+next-env.d.ts
+</file>
+
+<file path="app/admin/page.tsx">
+'use client'
+
+import { useState, useEffect, useCallback } from 'react'
+import { supabase } from '../lib/supabaseClient'
+import { QRCodeSVG } from 'qrcode.react'
+
+type EventData = {
+  id: number
+  name: string
+}
+
+export default function AdminPage() {
+  const [event, setEvent] = useState<EventData | null>(null)
+  const [qrUrl, setQrUrl] = useState('')
+  const [loading, setLoading] = useState(true)
+  const [regenerating, setRegenerating] = useState(false)
+
+  // 1. イベント情報の取得
+  useEffect(() => {
+    const fetchEvent = async () => {
+      const { data, error } = await supabase
+        .from('event-app')
+        .select('*')
+        .single()
+
+      if (error) {
+        console.error('Error:', error)
+        alert('イベントが見つかりません。')
+      } else {
+        setEvent(data)
+      }
+      setLoading(false)
+    }
+    fetchEvent()
+  }, [])
+
+  // トークン生成関数（有効期限：24時間）
+  const generateNewToken = useCallback(async (eventId: number) => {
+    setRegenerating(true)
+    try {
+      const token = Math.random().toString(36).substring(2, 15)
+      const expiresAt = new Date()
+      expiresAt.setDate(expiresAt.getDate() + 1) // 1日（24時間）後に設定
+
+      const { error } = await supabase
+        .from('event-token')
+        .insert({
+          event_id: eventId,
+          token: token,
+          expires_at: expiresAt.toISOString(),
+        })
+
+      if (error) throw error
+
+      const url = `${window.location.origin}/checkin?token=${token}`
+      setQrUrl(url)
+      console.log('New token generated:', token)
+    } catch (error) {
+      console.error('Token Generation Error:', error)
+      alert('トークンの生成に失敗しました')
+    } finally {
+      setRegenerating(false)
+    }
+  }, [])
+
+  // 2. 初期トークン確認と自動更新ロジック
+  useEffect(() => {
+    if (!event) return
+
+    // 既存の有効なトークンがあるかチェックする関数
+    const checkAndSetToken = async () => {
+      const { data, error } = await supabase
+        .from('event-token')
+        .select('*')
+        .eq('event_id', event.id)
+        .gt('expires_at', new Date().toISOString()) // 現在時刻より未来のもの
+        .order('created_at', { ascending: false })
+        .limit(1)
+        .single()
+
+      if (data && !error) {
+        // 有効なトークンがあればそれを使う
+        const url = `${window.location.origin}/checkin?token=${data.token}`
+        setQrUrl(url)
+      } else {
+        // なければ新規作成
+        await generateNewToken(event.id)
+      }
+    }
+
+    checkAndSetToken()
+
+    // 1分ごとに有効期限をチェックし、切れていたら自動更新する（実質1日ごとの自動更新）
+    const intervalId = setInterval(async () => {
+      // 現在表示中のQRが期限切れになっていないか確認するロジックをここに書くことも可能ですが、
+      // 簡易的に「checkAndSetToken」を定期実行して、なければ作る形にします。
+      checkAndSetToken()
+    }, 60000) // 1分ごとにチェック
+
+    return () => clearInterval(intervalId)
+  }, [event, generateNewToken])
+
+  // 手動更新ハンドラ
+  const handleManualRegenerate = () => {
+    if (!event) return
+    if (confirm('QRコードを新しく発行しますか？\n（古いQRコードは使用できなくなります）')) {
+      generateNewToken(event.id)
+    }
+  }
+
+  // --- ローディング表示 ---
+  if (loading) {
+    return (
+      <div className="min-h-screen flex items-center justify-center bg-gray-50 text-gray-600">
+        <div className="animate-pulse">読み込み中...</div>
+      </div>
+    )
+  }
+
+  // --- エラー表示 ---
+  if (!event) {
+    return (
+      <div className="min-h-screen flex items-center justify-center bg-gray-50">
+        <div className="text-center">
+          <h2 className="text-xl font-bold text-gray-800">データがありません</h2>
+        </div>
+      </div>
+    )
+  }
+
+  return (
+    <div className="min-h-screen bg-gray-50 flex flex-col font-sans">
+      {/* ヘッダー: 白背景に変更、ロゴ配置 */}
+      <header className="w-full bg-white shadow-sm border-b border-gray-200">
+        <div className="max-w-4xl mx-auto px-6 py-3 flex items-center justify-between">
+          <div className="flex items-center gap-3">
+            {/* ロゴ画像: publicフォルダに logo.png がある前提 */}
+            <img 
+              src="/logo.png" 
+              alt="しずおかコネクト Logo" 
+              className="h-10 w-auto object-contain"
+            />
+            <h1 className="text-lg font-bold text-blue-600 tracking-wide hidden sm:block">
+              しずおかコネクト
+            </h1>
+          </div>
+          <span className="text-xs font-medium bg-blue-50 text-blue-600 px-3 py-1 rounded-full border border-blue-100">
+            管理者用コンソール
+          </span>
+        </div>
+      </header>
+
+      {/* メインコンテンツ */}
+      <main className="flex-grow flex flex-col items-center justify-center p-6">
+        <div className="w-full max-w-md bg-white rounded-2xl shadow-xl overflow-hidden border border-gray-100">
+          
+          {/* イベント名エリア */}
+          <div className="bg-blue-600 p-6 text-center">
+            <h2 className="text-sm text-blue-100 font-medium mb-1">Check-in Event</h2>
+            <h3 className="text-2xl font-bold text-white tracking-tight">
+              {event.name}
+            </h3>
+          </div>
+
+          {/* QRコードエリア */}
+          <div className="p-8 flex flex-col items-center bg-white">
+            <p className="text-gray-600 mb-6 text-center text-sm">
+              参加者の方はこちらのQRコードを<br/>スマートフォンで読み取ってください
+            </p>
+
+            <div className="bg-white p-4 rounded-xl shadow-inner border border-gray-200 relative">
+              {qrUrl ? (
+                <QRCodeSVG value={qrUrl} size={240} />
+              ) : (
+                <div className="w-[240px] h-[240px] bg-gray-100 animate-pulse rounded flex items-center justify-center text-gray-400 text-xs">
+                  QR生成中...
+                </div>
+              )}
+              {regenerating && (
+                <div className="absolute inset-0 bg-white/80 flex items-center justify-center">
+                  <div className="w-8 h-8 border-4 border-blue-500 border-t-transparent rounded-full animate-spin"></div>
+                </div>
+              )}
+            </div>
+
+            <div className="mt-8 flex flex-col items-center gap-3 w-full">
+               <div className="flex items-center gap-2 text-xs text-green-600 font-medium bg-green-50 px-4 py-2 rounded-full border border-green-100">
+                <span className="w-2 h-2 rounded-full bg-green-500 animate-pulse"></span>
+                このコードは24時間有効です
+              </div>
+
+              {/* 手動更新ボタン */}
+              <button
+                onClick={handleManualRegenerate}
+                disabled={regenerating}
+                className="mt-2 text-sm text-gray-500 underline hover:text-blue-600 transition-colors disabled:opacity-50"
+              >
+                QRコードを更新する
+              </button>
+            </div>
+          </div>
+        </div>
+
+        <footer className="mt-8 text-gray-400 text-xs text-center">
+          &copy; Shizuoka Connect. All rights reserved.
+        </footer>
+      </main>
+    </div>
+  )
+}
+</file>
+
+<file path="app/auth/auth-code-error/page.tsx">
+'use client'
+
+import { useEffect, useState, Suspense } from 'react'
+import { useRouter, useSearchParams } from 'next/navigation'
+import { supabase } from '../../lib/supabaseClient'
+
+function AuthErrorContent() {
+  const router = useRouter()
+  const searchParams = useSearchParams()
+  const [message, setMessage] = useState('認証情報を確認しています...')
+
+  useEffect(() => {
+    const timer = setTimeout(async () => {
+      if (window.location.hash.includes('access_token')) {
+        setMessage('認証成功！画面を移動します...')
+        const { data: { session } } = await supabase.auth.getSession()
+        if (session) {
+          router.push('/update-password')
+        } else {
+          setMessage('セッション復元に失敗しました。メール送信からやり直してください。')
+        }
+      } else {
+        const errorDescription = searchParams.get('error_description')
+        setMessage(errorDescription || '認証リンクが無効か期限切れです。')
+      }
+    }, 500)
+    return () => clearTimeout(timer)
+  }, [router, searchParams])
+
+  return (
+    <div className="min-h-[100dvh] bg-gray-50 flex flex-col font-sans text-gray-900">
+      
+      <header className="w-full bg-white shadow-sm border-b border-gray-200 sticky top-0 z-10">
+        <div className="max-w-4xl mx-auto px-4 py-3 flex items-center gap-2">
+          <img 
+            src="/logo.png" 
+            alt="Logo" 
+            className="h-8 w-auto object-contain sm:h-10"
+          />
+          <h1 className="text-base font-bold text-blue-600 tracking-wide hidden sm:block">
+            しずおかコネクト
+          </h1>
+        </div>
+      </header>
+
+      <main className="flex-grow flex flex-col items-center justify-center p-4">
+        <div className="w-full max-w-md bg-white rounded-2xl shadow-xl overflow-hidden border border-gray-100">
+          
+          <div className={`${message.includes('成功') ? 'bg-blue-600' : 'bg-red-500'} p-5 text-center transition-colors duration-300`}>
+            <h2 className="text-xl font-bold text-white tracking-tight">
+              {message.includes('成功') ? 'Processing' : 'Authentication Error'}
+            </h2>
+          </div>
+
+          <div className="p-6 text-center">
+            <div className="mb-6 flex justify-center">
+              {message.includes('成功') ? (
+                <div className="w-16 h-16 rounded-full bg-blue-100 flex items-center justify-center text-blue-600">
+                  <svg className="w-8 h-8 animate-spin" fill="none" viewBox="0 0 24 24">
+                    <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4"></circle>
+                    <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path>
+                  </svg>
+                </div>
+              ) : (
+                <div className="w-16 h-16 rounded-full bg-red-100 flex items-center justify-center text-red-500">
+                  <svg xmlns="http://www.w3.org/2000/svg" className="h-8 w-8" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
+                    <path strokeLinecap="round" strokeLinejoin="round" d="M12 9v2m0 4h.01m-6.938 4h13.856c1.54 0 2.502-1.667 1.732-3L13.732 4c-.77-1.333-2.694-1.333-3.464 0L3.34 16c-.77 1.333.192 3 1.732 3z" />
+                  </svg>
+                </div>
+              )}
+            </div>
+
+            <p className="text-gray-600 mb-8 leading-relaxed text-sm">
+              {message}
+            </p>
+
+            {!message.includes('成功') && (
+              <div className="flex flex-col gap-3">
+                <a 
+                  href="/reset-password" 
+                  className="w-full bg-blue-600 text-white py-3 rounded-lg font-bold hover:bg-blue-700 transition-colors shadow-sm block text-center active:scale-[0.98]"
+                >
+                  再設定をやり直す
+                </a>
+                <a 
+                  href="/login" 
+                  className="w-full bg-white border border-gray-200 text-gray-500 py-3 rounded-lg font-bold hover:bg-gray-50 transition-colors block text-sm text-center active:scale-[0.98]"
+                >
+                  ログインへ戻る
+                </a>
+              </div>
+            )}
+          </div>
+        </div>
+
+        <footer className="mt-6 text-gray-400 text-[10px] text-center">
+          &copy; Shizuoka Connect.
+        </footer>
+      </main>
+    </div>
+  )
+}
+
+export default function AuthErrorPage() {
+  return (
+    <Suspense fallback={<div className="min-h-[100dvh] flex items-center justify-center bg-gray-50">Loading...</div>}>
+      <AuthErrorContent />
+    </Suspense>
+  )
+}
+</file>
+
+<file path="app/globals.css">
+@import "tailwindcss";
+
+:root {
+  --background: #ffffff;
+  --foreground: #171717;
+}
+
+@theme inline {
+  --color-background: var(--background);
+  --color-foreground: var(--foreground);
+  --font-sans: var(--font-geist-sans);
+  --font-mono: var(--font-geist-mono);
+}
+
+@media (prefers-color-scheme: dark) {
+  :root {
+    --background: #0a0a0a;
+    --foreground: #ededed;
+  }
+}
+
+body {
+  background: var(--background);
+  color: var(--foreground);
+  font-family: Arial, Helvetica, sans-serif;
+}
+</file>
+
+<file path="app/layout.tsx">
+import type { Metadata } from "next";
+import { Geist, Geist_Mono } from "next/font/google";
+import "./globals.css";
+
+const geistSans = Geist({
+  variable: "--font-geist-sans",
+  subsets: ["latin"],
+});
+
+const geistMono = Geist_Mono({
+  variable: "--font-geist-mono",
+  subsets: ["latin"],
+});
+
+export const metadata: Metadata = {
+  title: "Create Next App",
+  description: "Generated by create next app",
+};
+
+export default function RootLayout({
+  children,
+}: Readonly<{
+  children: React.ReactNode;
+}>) {
+  return (
+    <html lang="en">
+      <body
+        className={`${geistSans.variable} ${geistMono.variable} antialiased`}
+      >
+        {children}
+      </body>
+    </html>
+  );
+}
+</file>
+
+<file path="app/lib/supabaseClient.ts">
+import { createClient } from '@supabase/supabase-js'
+
+const supabaseUrl = process.env.NEXT_PUBLIC_SUPABASE_URL!
+const supabaseAnonKey = process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY!
+
+export const supabase = createClient(supabaseUrl, supabaseAnonKey)
+</file>
+
+<file path="app/login/page.tsx">
+'use client'
+
+import { useState } from 'react'
+import { supabase } from '../lib/supabaseClient'
+import { useRouter } from 'next/navigation'
+import Link from 'next/link'
+
+export default function LoginPage() {
+  const [email, setEmail] = useState('')
+  const [password, setPassword] = useState('')
+  const [loading, setLoading] = useState(false)
+  const router = useRouter()
+
+  // ログイン処理
+  const handleLogin = async (e: React.FormEvent) => {
+    e.preventDefault()
+    setLoading(true)
+    
+    const { error } = await supabase.auth.signInWithPassword({
+      email,
+      password,
+    })
+
+    if (error) {
+      alert('エラー: ' + error.message)
+    } else {
+      // alert('ログイン成功！マイページへ移動します。') 
+      router.push('/mypage')
+    }
+    setLoading(false)
+  }
+
+  // 新規登録処理
+  const handleSignUp = async () => {
+    setLoading(true)
+    
+    const { error } = await supabase.auth.signUp({
+      email,
+      password,
+    })
+
+    if (error) {
+      alert('エラー: ' + error.message)
+    } else {
+      alert('登録完了！そのままログインします。')
+      router.push('/mypage')
+    }
+    setLoading(false)
+  }
+
+  return (
+    <div className="min-h-[100dvh] bg-gray-50 flex flex-col font-sans text-gray-900">
+      
+      {/* ヘッダー: スマホ対応 (sticky) */}
+      <header className="w-full bg-white shadow-sm border-b border-gray-200 sticky top-0 z-10">
+        <div className="max-w-4xl mx-auto px-4 py-3 flex items-center justify-between">
+          <div className="flex items-center gap-2">
+            <img 
+              src="/logo.png" 
+              alt="Logo" 
+              className="h-8 w-auto object-contain sm:h-10"
+            />
+            <h1 className="text-base font-bold text-blue-600 tracking-wide hidden sm:block">
+              しずおかコネクト
+            </h1>
+          </div>
+          <span className="text-[10px] sm:text-xs font-medium bg-blue-50 text-blue-600 px-3 py-1 rounded-full border border-blue-100">
+            ログイン
+          </span>
+        </div>
+      </header>
+
+      {/* メインコンテンツ */}
+      <main className="flex-grow flex flex-col items-center justify-center p-4">
+        <div className="w-full max-w-md bg-white rounded-2xl shadow-xl overflow-hidden border border-gray-100">
+          
+          {/* カードヘッダー: ブランドカラーで統一 */}
+          <div className="bg-blue-600 p-6 text-center">
+            <h2 className="text-xl font-bold text-white tracking-tight">
+              ログイン / 新規登録
+            </h2>
+            <p className="text-blue-100 text-xs mt-2 opacity-90">
+              アカウント情報を入力してください
+            </p>
+          </div>
+
+          <div className="p-6 sm:p-8">
+            <form onSubmit={handleLogin} className="flex flex-col gap-5">
+              
+              {/* メールアドレス入力 */}
+              <div>
+                <label className="mb-1 block text-sm font-medium text-gray-700">
+                  メールアドレス
+                </label>
+                <input
+                  type="email"
+                  value={email}
+                  onChange={(e) => setEmail(e.target.value)}
+                  required
+                  className="w-full rounded-lg border border-gray-300 bg-gray-50 p-3 text-base outline-none transition focus:bg-white focus:border-blue-500 focus:ring-2 focus:ring-blue-100"
+                  placeholder="name@example.com"
+                />
+              </div>
+
+              {/* パスワード入力 */}
+              <div>
+                <label className="mb-1 block text-sm font-medium text-gray-700">
+                  パスワード
+                </label>
+                <input
+                  type="password"
+                  value={password}
+                  onChange={(e) => setPassword(e.target.value)}
+                  required
+                  className="w-full rounded-lg border border-gray-300 bg-gray-50 p-3 text-base outline-none transition focus:bg-white focus:border-blue-500 focus:ring-2 focus:ring-blue-100"
+                  placeholder="パスワードを入力"
+                />
+                
+                {/* パスワードリセットリンク */}
+                <div className="mt-2 text-right">
+                  <Link 
+                    href="/reset-password" 
+                    className="text-xs sm:text-sm font-medium text-blue-600 hover:text-blue-800 hover:underline py-1 inline-block"
+                  >
+                    パスワードを忘れた方はこちら
+                  </Link>
+                </div>
+              </div>
+
+              {/* アクションボタン群 */}
+              <div className="flex flex-col gap-3 mt-4">
+                <button
+                  type="submit"
+                  disabled={loading}
+                  className="w-full rounded-lg bg-blue-600 py-3.5 font-bold text-white shadow-md transition hover:bg-blue-700 disabled:opacity-50 active:scale-[0.98] text-sm sm:text-base"
+                >
+                  {loading ? '処理中...' : 'ログインする'}
+                </button>
+                
+                {/* 分割線 */}
+                <div className="relative flex items-center justify-center py-2">
+                  <div className="absolute inset-0 flex items-center">
+                    <div className="w-full border-t border-gray-200"></div>
+                  </div>
+                  <span className="relative bg-white px-2 text-xs text-gray-400">または</span>
+                </div>
+
+                <button 
+                  type="button" 
+                  onClick={handleSignUp} 
+                  disabled={loading}
+                  className="w-full rounded-lg border border-gray-300 bg-white py-3.5 font-bold text-gray-700 shadow-sm transition hover:bg-gray-50 disabled:opacity-50 active:scale-[0.98] text-sm sm:text-base"
+                >
+                  新規登録する
+                </button>
+              </div>
+            </form>
+          </div>
+        </div>
+
+        <footer className="mt-8 text-gray-400 text-[10px] text-center">
+          &copy; Shizuoka Connect. All rights reserved.
+        </footer>
+      </main>
+    </div>
+  )
+}
+</file>
+
+<file path="app/update-password/page.tsx">
+'use client'
+
+import { useState, useEffect } from 'react'
+import { supabase } from '../lib/supabaseClient'
+import { useRouter } from 'next/navigation'
+
+export default function UpdatePasswordPage() {
+  const [password, setPassword] = useState('')
+  const [loading, setLoading] = useState(false)
+  const [sessionChecked, setSessionChecked] = useState(false)
+  const router = useRouter()
+
+  useEffect(() => {
+    // 画面が開いたら、URLに含まれる認証情報をSupabaseに認識させる
+    const checkSession = async () => {
+      const { data: { session } } = await supabase.auth.getSession()
+     
+      // まだセッションがない場合、SupabaseがURLハッシュ(#access_token=...)を
+      // 自動検知してログイン完了するのを少し待つ必要がある
+      if (!session) {
+        // auth.onAuthStateChange を使ってログイン完了イベントを待つ
+        const { data: { subscription } } = supabase.auth.onAuthStateChange((event, session) => {
+          if (event === 'PASSWORD_RECOVERY' || session) {
+            setSessionChecked(true)
+          }
+        })
+        return () => subscription.unsubscribe()
+      } else {
+        setSessionChecked(true)
+      }
+    }
+    checkSession()
+  }, [])
+
+  const handleUpdate = async (e: React.FormEvent) => {
+    e.preventDefault()
+    setLoading(true)
+
+    const { error } = await supabase.auth.updateUser({
+      password: password
+    })
+
+    if (error) {
+      alert('エラー: ' + error.message)
+    } else {
+      alert('パスワードを変更しました！マイページへ移動します。')
+      router.push('/mypage')
+    }
+    setLoading(false)
+  }
+
+  // --- セッション確認中 (ローディング表示) ---
+  if (!sessionChecked) {
+    return (
+      <div className="min-h-[100dvh] flex items-center justify-center bg-gray-50 text-gray-600">
+        <div className="animate-pulse flex flex-col items-center gap-2">
+          <div className="w-8 h-8 border-4 border-blue-200 border-t-blue-600 rounded-full animate-spin"></div>
+          <span className="text-xs">認証情報を確認中...</span>
+        </div>
+      </div>
+    )
+  }
+
+  // --- メイン画面 ---
+  return (
+    <div className="min-h-[100dvh] bg-gray-50 flex flex-col font-sans text-gray-900">
+      
+      {/* ヘッダー: スマホ対応 (sticky) */}
+      <header className="w-full bg-white shadow-sm border-b border-gray-200 sticky top-0 z-10">
+        <div className="max-w-4xl mx-auto px-4 py-3 flex items-center justify-between">
+          <div className="flex items-center gap-2">
+            <img 
+              src="/logo.png" 
+              alt="Logo" 
+              className="h-8 w-auto object-contain sm:h-10"
+            />
+            <h1 className="text-base font-bold text-blue-600 tracking-wide hidden sm:block">
+              しずおかコネクト
+            </h1>
+          </div>
+          <span className="text-[10px] sm:text-xs font-medium bg-blue-50 text-blue-600 px-3 py-1 rounded-full border border-blue-100">
+            パスワード設定
+          </span>
+        </div>
+      </header>
+
+      {/* メインコンテンツ */}
+      <main className="flex-grow flex flex-col items-center justify-center p-4">
+        <div className="w-full max-w-md bg-white rounded-2xl shadow-xl overflow-hidden border border-gray-100">
+          
+          {/* カードヘッダー */}
+          <div className="bg-blue-600 p-6 text-center">
+            <h2 className="text-xl font-bold text-white tracking-tight">
+              新しいパスワード
+            </h2>
+            <p className="text-blue-100 text-xs mt-2 opacity-90">
+              セキュリティのため6文字以上で設定してください
+            </p>
+          </div>
+
+          <div className="p-6 sm:p-8">
+            <form onSubmit={handleUpdate} className="flex flex-col gap-5">
+              
+              <div>
+                <label className="mb-1 block text-sm font-medium text-gray-700">
+                  パスワード
+                </label>
+                <input
+                  type="password"
+                  value={password}
+                  onChange={(e) => setPassword(e.target.value)}
+                  required
+                  minLength={6}
+                  className="w-full rounded-lg border border-gray-300 bg-gray-50 p-3 text-base outline-none transition focus:bg-white focus:border-blue-500 focus:ring-2 focus:ring-blue-100"
+                  placeholder="6文字以上で入力"
+                />
+              </div>
+
+              <button
+                type="submit"
+                disabled={loading}
+                className="w-full rounded-lg bg-blue-600 py-3.5 font-bold text-white shadow-md transition hover:bg-blue-700 disabled:opacity-50 active:scale-[0.98] text-sm sm:text-base mt-2"
+              >
+                {loading ? '更新中...' : 'パスワードを変更する'}
+              </button>
+            </form>
+          </div>
+        </div>
+
+        <footer className="mt-8 text-gray-400 text-[10px] text-center">
+          &copy; Shizuoka Connect. All rights reserved.
+        </footer>
+      </main>
+    </div>
+  )
+}
+</file>
+
+<file path="eslint.config.mjs">
+import { defineConfig, globalIgnores } from "eslint/config";
+import nextVitals from "eslint-config-next/core-web-vitals";
+import nextTs from "eslint-config-next/typescript";
+
+const eslintConfig = defineConfig([
+  ...nextVitals,
+  ...nextTs,
+  // Override default ignores of eslint-config-next.
+  globalIgnores([
+    // Default ignores of eslint-config-next:
+    ".next/**",
+    "out/**",
+    "build/**",
+    "next-env.d.ts",
+  ]),
+]);
+
+export default eslintConfig;
+</file>
+
+<file path="next.config.ts">
+import type { NextConfig } from "next";
+
+const nextConfig: NextConfig = {
+  /* config options here */
+};
+
+export default nextConfig;
+</file>
+
+<file path="postcss.config.mjs">
+const config = {
+  plugins: {
+    "@tailwindcss/postcss": {},
+  },
+};
+
+export default config;
+</file>
+
+<file path="public/file.svg">
+<svg fill="none" viewBox="0 0 16 16" xmlns="http://www.w3.org/2000/svg"><path d="M14.5 13.5V5.41a1 1 0 0 0-.3-.7L9.8.29A1 1 0 0 0 9.08 0H1.5v13.5A2.5 2.5 0 0 0 4 16h8a2.5 2.5 0 0 0 2.5-2.5m-1.5 0v-7H8v-5H3v12a1 1 0 0 0 1 1h8a1 1 0 0 0 1-1M9.5 5V2.12L12.38 5zM5.13 5h-.62v1.25h2.12V5zm-.62 3h7.12v1.25H4.5zm.62 3h-.62v1.25h7.12V11z" clip-rule="evenodd" fill="#666" fill-rule="evenodd"/></svg>
+</file>
+
+<file path="public/globe.svg">
+<svg fill="none" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 16 16"><g clip-path="url(#a)"><path fill-rule="evenodd" clip-rule="evenodd" d="M10.27 14.1a6.5 6.5 0 0 0 3.67-3.45q-1.24.21-2.7.34-.31 1.83-.97 3.1M8 16A8 8 0 1 0 8 0a8 8 0 0 0 0 16m.48-1.52a7 7 0 0 1-.96 0H7.5a4 4 0 0 1-.84-1.32q-.38-.89-.63-2.08a40 40 0 0 0 3.92 0q-.25 1.2-.63 2.08a4 4 0 0 1-.84 1.31zm2.94-4.76q1.66-.15 2.95-.43a7 7 0 0 0 0-2.58q-1.3-.27-2.95-.43a18 18 0 0 1 0 3.44m-1.27-3.54a17 17 0 0 1 0 3.64 39 39 0 0 1-4.3 0 17 17 0 0 1 0-3.64 39 39 0 0 1 4.3 0m1.1-1.17q1.45.13 2.69.34a6.5 6.5 0 0 0-3.67-3.44q.65 1.26.98 3.1M8.48 1.5l.01.02q.41.37.84 1.31.38.89.63 2.08a40 40 0 0 0-3.92 0q.25-1.2.63-2.08a4 4 0 0 1 .85-1.32 7 7 0 0 1 .96 0m-2.75.4a6.5 6.5 0 0 0-3.67 3.44 29 29 0 0 1 2.7-.34q.31-1.83.97-3.1M4.58 6.28q-1.66.16-2.95.43a7 7 0 0 0 0 2.58q1.3.27 2.95.43a18 18 0 0 1 0-3.44m.17 4.71q-1.45-.12-2.69-.34a6.5 6.5 0 0 0 3.67 3.44q-.65-1.27-.98-3.1" fill="#666"/></g><defs><clipPath id="a"><path fill="#fff" d="M0 0h16v16H0z"/></clipPath></defs></svg>
+</file>
+
+<file path="public/next.svg">
+<svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 394 80"><path fill="#000" d="M262 0h68.5v12.7h-27.2v66.6h-13.6V12.7H262V0ZM149 0v12.7H94v20.4h44.3v12.6H94v21h55v12.6H80.5V0h68.7zm34.3 0h-17.8l63.8 79.4h17.9l-32-39.7 32-39.6h-17.9l-23 28.6-23-28.6zm18.3 56.7-9-11-27.1 33.7h17.8l18.3-22.7z"/><path fill="#000" d="M81 79.3 17 0H0v79.3h13.6V17l50.2 62.3H81Zm252.6-.4c-1 0-1.8-.4-2.5-1s-1.1-1.6-1.1-2.6.3-1.8 1-2.5 1.6-1 2.6-1 1.8.3 2.5 1a3.4 3.4 0 0 1 .6 4.3 3.7 3.7 0 0 1-3 1.8zm23.2-33.5h6v23.3c0 2.1-.4 4-1.3 5.5a9.1 9.1 0 0 1-3.8 3.5c-1.6.8-3.5 1.3-5.7 1.3-2 0-3.7-.4-5.3-1s-2.8-1.8-3.7-3.2c-.9-1.3-1.4-3-1.4-5h6c.1.8.3 1.6.7 2.2s1 1.2 1.6 1.5c.7.4 1.5.5 2.4.5 1 0 1.8-.2 2.4-.6a4 4 0 0 0 1.6-1.8c.3-.8.5-1.8.5-3V45.5zm30.9 9.1a4.4 4.4 0 0 0-2-3.3 7.5 7.5 0 0 0-4.3-1.1c-1.3 0-2.4.2-3.3.5-.9.4-1.6 1-2 1.6a3.5 3.5 0 0 0-.3 4c.3.5.7.9 1.3 1.2l1.8 1 2 .5 3.2.8c1.3.3 2.5.7 3.7 1.2a13 13 0 0 1 3.2 1.8 8.1 8.1 0 0 1 3 6.5c0 2-.5 3.7-1.5 5.1a10 10 0 0 1-4.4 3.5c-1.8.8-4.1 1.2-6.8 1.2-2.6 0-4.9-.4-6.8-1.2-2-.8-3.4-2-4.5-3.5a10 10 0 0 1-1.7-5.6h6a5 5 0 0 0 3.5 4.6c1 .4 2.2.6 3.4.6 1.3 0 2.5-.2 3.5-.6 1-.4 1.8-1 2.4-1.7a4 4 0 0 0 .8-2.4c0-.9-.2-1.6-.7-2.2a11 11 0 0 0-2.1-1.4l-3.2-1-3.8-1c-2.8-.7-5-1.7-6.6-3.2a7.2 7.2 0 0 1-2.4-5.7 8 8 0 0 1 1.7-5 10 10 0 0 1 4.3-3.5c2-.8 4-1.2 6.4-1.2 2.3 0 4.4.4 6.2 1.2 1.8.8 3.2 2 4.3 3.4 1 1.4 1.5 3 1.5 5h-5.8z"/></svg>
+</file>
+
+<file path="public/vercel.svg">
+<svg fill="none" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1155 1000"><path d="m577.3 0 577.4 1000H0z" fill="#fff"/></svg>
+</file>
+
+<file path="public/window.svg">
+<svg fill="none" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 16 16"><path fill-rule="evenodd" clip-rule="evenodd" d="M1.5 2.5h13v10a1 1 0 0 1-1 1h-11a1 1 0 0 1-1-1zM0 1h16v11.5a2.5 2.5 0 0 1-2.5 2.5h-11A2.5 2.5 0 0 1 0 12.5zm3.75 4.5a.75.75 0 1 0 0-1.5.75.75 0 0 0 0 1.5M7 4.75a.75.75 0 1 1-1.5 0 .75.75 0 0 1 1.5 0m1.75.75a.75.75 0 1 0 0-1.5.75.75 0 0 0 0 1.5" fill="#666"/></svg>
+</file>
+
+<file path="README.md">
+This is a [Next.js](https://nextjs.org) project bootstrapped with [`create-next-app`](https://nextjs.org/docs/app/api-reference/cli/create-next-app).
+
+## Getting Started
+
+First, run the development server:
+
+```bash
+npm run dev
+# or
+yarn dev
+# or
+pnpm dev
+# or
+bun dev
+```
+
+Open [http://localhost:3000](http://localhost:3000) with your browser to see the result.
+
+You can start editing the page by modifying `app/page.tsx`. The page auto-updates as you edit the file.
+
+This project uses [`next/font`](https://nextjs.org/docs/app/building-your-application/optimizing/fonts) to automatically optimize and load [Geist](https://vercel.com/font), a new font family for Vercel.
+
+## Learn More
+
+To learn more about Next.js, take a look at the following resources:
+
+- [Next.js Documentation](https://nextjs.org/docs) - learn about Next.js features and API.
+- [Learn Next.js](https://nextjs.org/learn) - an interactive Next.js tutorial.
+
+You can check out [the Next.js GitHub repository](https://github.com/vercel/next.js) - your feedback and contributions are welcome!
+
+## Deploy on Vercel
+
+The easiest way to deploy your Next.js app is to use the [Vercel Platform](https://vercel.com/new?utm_medium=default-template&filter=next.js&utm_source=create-next-app&utm_campaign=create-next-app-readme) from the creators of Next.js.
+
+Check out our [Next.js deployment documentation](https://nextjs.org/docs/app/building-your-application/deploying) for more details.
+</file>
+
+<file path="app/admin/qr/page.tsx">
+'use client'
+
+import { useEffect, useState, useCallback } from 'react'
+import { supabase } from '../../lib/supabaseClient'
+import { useRouter } from 'next/navigation'
+import QRCode from 'react-qr-code'
+
+const ADMIN_EMAILS = [
+  'admin@test.com', 
+  'campustocommunityshizuoka@gmail.com'
+]
+
+// 画像のデータに合わせて ID:1 のイベントを操作対象とします
+const EVENT_ID = 1
+
+export default function AdminQRPage() {
+  const [loading, setLoading] = useState(true)
+  const [isAdmin, setIsAdmin] = useState(false)
+  const [qrValue, setQrValue] = useState('')
+  const [isUpdating, setIsUpdating] = useState(false)
+  const router = useRouter()
+
+  // 今日の日付とランダムな文字列を組み合わせてコードを生成する関数
+  const generateCode = () => {
+    const today = new Date().toISOString().split('T')[0]
+    const randomSuffix = Math.random().toString(36).substring(2, 8)
+    return `event-${EVENT_ID}-${today}-${randomSuffix}`
+  }
+
+  // ★重要: 生成されたQRコードをデータベース(event-app)に保存する関数
+  const saveQrToDatabase = async (code: string) => {
+    try {
+      // テーブル名を 'event-app' に修正し、実際に更新処理を行う
+      const { error } = await supabase
+        .from('event-app')
+        .update({ secret_code: code })
+        .eq('id', EVENT_ID)
+
+      if (error) throw error
+      console.log('新しいQRコードをDBに保存しました:', code)
+    } catch (error) {
+      console.error('保存エラー:', error)
+      alert('QRコードの保存に失敗しました。コンソールを確認してください。')
+      throw error
+    }
+  }
+
+  // ★追加: ページ読み込み時に、現在DBにある有効なQRコードを取得する関数
+  const fetchCurrentQr = useCallback(async () => {
+    try {
+      const { data, error } = await supabase
+        .from('event-app') // テーブル名を 'event-app' に修正
+        .select('secret_code')
+        .eq('id', EVENT_ID)
+        .single()
+
+      if (error) throw error
+
+      if (data && data.secret_code) {
+        setQrValue(data.secret_code)
+      } else {
+        // まだ値がない場合は新規生成して保存
+        const newCode = generateCode()
+        await saveQrToDatabase(newCode)
+        setQrValue(newCode)
+      }
+    } catch (error) {
+      console.error('取得エラー:', error)
+    }
+  }, [])
+
+  // QRコードの手動更新ハンドラー
+  const handleRefreshQr = async () => {
+    const confirmed = window.confirm('QRコードを更新しますか？\n以前のQRコードは無効になります。')
+    if (!confirmed) return
+
+    setIsUpdating(true)
+    const newCode = generateCode()
+    
+    try {
+      await saveQrToDatabase(newCode) // DB保存を待つ
+      setQrValue(newCode)             // 画面更新
+      alert('QRコードを更新しました')
+    } catch (e) {
+      // エラー処理はsaveQrToDatabase内で行済み
+    } finally {
+      setIsUpdating(false)
+    }
+  }
+
+  useEffect(() => {
+    const checkAdmin = async () => {
+      const { data: { user } } = await supabase.auth.getUser()
+      
+      // ユーザーが存在し、かつメールアドレスが許可リストに含まれているか確認
+      if (user && user.email && ADMIN_EMAILS.includes(user.email)) {
+        setIsAdmin(true)
+        // 権限があれば現在のコードを取得
+        await fetchCurrentQr()
+      } else {
+        router.push('/')
+      }
+      setLoading(false)
+    }
+    checkAdmin()
+  }, [router, fetchCurrentQr])
+
+  const handleLogout = async () => {
+    await supabase.auth.signOut()
+    router.push('/login')
+  }
+
+  if (loading) return <div className="p-10 text-center">確認中...</div>
+
+  if (!isAdmin) return null
+
+  return (
+    <div className="min-h-screen bg-gray-50 flex flex-col items-center justify-center p-4 font-sans">
+      <div className="bg-white p-8 rounded-2xl shadow-xl max-w-sm w-full text-center border border-gray-100">
+        <h1 className="text-2xl font-bold text-gray-800 mb-2">管理者用QRコード</h1>
+        <p className="text-gray-500 text-sm mb-4">参加者はこのコードを読み取ります</p>
+        
+        <p className="text-xs text-gray-400 font-mono mb-4 break-all bg-gray-100 p-2 rounded">
+          Current Code: {qrValue}
+        </p>
+
+        <div className="bg-white p-4 rounded-xl border-2 border-dashed border-blue-200 inline-block mb-6">
+          {qrValue ? (
+            <QRCode
+              value={qrValue}
+              size={200}
+              style={{ height: "auto", maxWidth: "100%", width: "100%" }}
+              viewBox={`0 0 256 256`}
+            />
+          ) : (
+            <div className="h-[200px] w-[200px] flex items-center justify-center text-gray-300">
+              Generating...
+            </div>
+          )}
+        </div>
+
+        <div className="flex flex-col gap-3">
+          <button 
+            onClick={handleRefreshQr}
+            disabled={isUpdating}
+            className="w-full py-3 bg-blue-600 text-white font-bold rounded-xl hover:bg-blue-700 transition-colors shadow-md disabled:opacity-50"
+          >
+            {isUpdating ? '更新中...' : 'QRコードを更新する'}
+          </button>
+          <p className="text-xs text-gray-400 mb-4">
+            ※更新すると以前のQRコードは無効になります
+          </p>
+
+          <div className="h-px bg-gray-200 my-2"></div>
+
+          <button 
+            onClick={() => router.push('/mypage')}
+            className="w-full py-3 bg-gray-100 text-gray-700 font-bold rounded-xl hover:bg-gray-200 transition-colors"
+          >
+            マイページへ戻る
+          </button>
+          
+          <button 
+            onClick={handleLogout}
+            className="text-sm text-gray-400 hover:text-red-500 transition-colors"
+          >
+            ログアウト
+          </button>
+        </div>
+      </div>
+    </div>
+  )
+}
+</file>
+
+<file path="app/checkin/page.tsx">
+'use client'
+
+import { useEffect, useState, Suspense } from 'react'
+import { supabase } from '../lib/supabaseClient' // パスはご自身の環境に合わせてください
+import { useRouter, useSearchParams } from 'next/navigation'
+import { Scanner } from '@yudiel/react-qr-scanner'
+
+function CheckInContent() {
+  const searchParams = useSearchParams()
+  const urlToken = searchParams ? searchParams.get('token') : null
+  const router = useRouter()
+
+  const [status, setStatus] = useState<'scan_mode' | 'processing' | 'success' | 'error'>('scan_mode')
+  const [message, setMessage] = useState('')
+
+  useEffect(() => {
+    if (urlToken) handleCheckIn(urlToken)
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [urlToken])
+
+  const handleCheckIn = async (tokenRaw: string) => {
+    if (status === 'processing' || status === 'success') return
+
+    setStatus('processing')
+    let token = tokenRaw
+    
+    // URL形式で読み取ってしまった場合の処理
+    try {
+      if (tokenRaw.includes('token=')) {
+        const url = new URL(tokenRaw)
+        const extracted = url.searchParams.get('token')
+        if (extracted) token = extracted
+      }
+    } catch (e) { console.log(e) }
+
+    const { data: { user } } = await supabase.auth.getUser()
+    if (!user) {
+      alert('チェックインにはログインが必要です')
+      router.push('/login')
+      return
+    }
+
+    // ★修正: テーブル名を 'event-app' に変更し、secret_code を照合
+    const { data: eventData, error: eventError } = await supabase
+      .from('event-app')
+      .select('id, name') 
+      .eq('secret_code', token)
+      .single()
+
+    // デバッグ用ログ（本番では削除してもOK）
+    if (eventError) {
+      console.log('検索エラー:', eventError)
+    }
+
+    if (eventError || !eventData) {
+      setStatus('error')
+      setMessage('無効なQRコード、または有効期限切れです')
+      return
+    }
+
+    // すでに参加済みかチェック
+    const { data: existing } = await supabase
+      .from('participations')
+      .select('*')
+      .eq('user_id', user.id)
+      .eq('event_id', eventData.id)
+      .single()
+
+    if (existing) {
+      setStatus('error')
+      setMessage('すでにチェックイン済みです')
+      return
+    }
+
+    // 参加データを登録
+    const { error: insertError } = await supabase
+      .from('participations')
+      .insert({
+        user_id: user.id,
+        event_id: eventData.id,
+        checked_in_at: new Date().toISOString(),
+      })
+
+    if (insertError) {
+      setStatus('error')
+      setMessage('登録失敗: ' + insertError.message)
+    } else {
+      setStatus('success')
+    }
+  }
+
+  const handleScan = (result: { rawValue: string }[]) => {
+    if (result && result.length > 0 && result[0].rawValue) {
+      handleCheckIn(result[0].rawValue)
+    }
+  }
+
+  return (
+    <div className="min-h-[100dvh] bg-gray-50 flex flex-col font-sans text-gray-900">
+      
+      <header className="w-full bg-white shadow-sm border-b border-gray-200 sticky top-0 z-10">
+        <div className="max-w-4xl mx-auto px-4 py-3 flex items-center justify-between">
+          <div className="flex items-center gap-2">
+            <img 
+              src="/logo.png" 
+              alt="Logo" 
+              className="h-8 w-auto object-contain sm:h-10"
+            />
+            <h1 className="text-base font-bold text-blue-600 tracking-wide hidden sm:block">
+              しずおかコネクト
+            </h1>
+          </div>
+          <span className="text-[10px] font-medium bg-blue-50 text-blue-600 px-2 py-1 rounded-full border border-blue-100">
+            QRチェックイン
+          </span>
+        </div>
+      </header>
+
+      <main className="flex-grow flex flex-col items-center justify-center p-4">
+        <div className="w-full max-w-md bg-white rounded-2xl shadow-xl overflow-hidden border border-gray-100">
+          
+          <div className={`p-5 text-center transition-colors duration-300 ${
+            status === 'success' ? 'bg-green-500' : 
+            status === 'error' ? 'bg-red-500' : 
+            'bg-blue-600'
+          }`}>
+            <h2 className="text-xl font-bold text-white tracking-tight">
+              {status === 'scan_mode' && 'QR Check-in'}
+              {status === 'processing' && 'Processing...'}
+              {status === 'success' && 'Complete'}
+              {status === 'error' && 'Failed'}
+            </h2>
+            <p className="text-white/90 text-xs mt-1">
+              {status === 'scan_mode' && 'QRコードを読み取ってください'}
+              {status === 'processing' && '確認中...'}
+              {status === 'success' && 'チェックインしました'}
+              {status === 'error' && 'エラーが発生しました'}
+            </p>
+          </div>
+
+          <div className="p-5">
+            
+            {status === 'scan_mode' && (
+              <div className="flex flex-col items-center">
+                <div className="w-full aspect-square bg-gray-900 rounded-xl overflow-hidden shadow-inner relative border-4 border-gray-100">
+                  <Scanner 
+                    onScan={handleScan}
+                    constraints={{ facingMode: 'environment' }}
+                    styles={{
+                      container: { width: '100%', height: '100%' },
+                      video: { width: '100%', height: '100%', objectFit: 'cover' }
+                    }}
+                  />
+                  {/* スキャン枠 */}
+                  <div className="absolute inset-0 border-[20px] sm:border-[30px] border-black/30 pointer-events-none flex items-center justify-center">
+                    <div className="w-40 h-40 sm:w-48 sm:h-48 border-2 border-white/50 rounded-lg relative">
+                      <div className="absolute top-0 left-0 w-4 h-4 border-t-2 border-l-2 border-white"></div>
+                      <div className="absolute top-0 right-0 w-4 h-4 border-t-2 border-r-2 border-white"></div>
+                      <div className="absolute bottom-0 left-0 w-4 h-4 border-b-2 border-l-2 border-white"></div>
+                      <div className="absolute bottom-0 right-0 w-4 h-4 border-b-2 border-r-2 border-white"></div>
+                    </div>
+                  </div>
+                </div>
+                
+                <p className="mt-4 text-[10px] text-gray-400 text-center">
+                  カメラを許可してください
+                </p>
+
+                <button 
+                  onClick={() => router.push('/mypage')}
+                  className="mt-4 text-gray-500 text-sm hover:text-gray-800 underline py-2"
+                >
+                  キャンセル
+                </button>
+              </div>
+            )}
+
+            {status === 'processing' && (
+              <div className="py-12 flex flex-col items-center">
+                <div className="w-12 h-12 border-4 border-blue-200 border-t-blue-600 rounded-full animate-spin mb-4"></div>
+                <p className="text-gray-600 text-sm">照合中...</p>
+              </div>
+            )}
+
+            {status === 'success' && (
+              <div className="py-6 flex flex-col items-center text-center">
+                <div className="w-16 h-16 bg-green-100 rounded-full flex items-center justify-center mb-6 text-green-500">
+                  <svg className="w-8 h-8" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={3}>
+                    <path strokeLinecap="round" strokeLinejoin="round" d="M5 13l4 4L19 7" />
+                  </svg>
+                </div>
+                <h3 className="text-lg font-bold text-gray-800 mb-2">完了しました</h3>
+                <p className="text-gray-600 mb-6 text-sm">イベントをお楽しみください</p>
+                
+                <button 
+                  onClick={() => router.push('/mypage')}
+                  className="w-full bg-blue-600 text-white py-3 rounded-lg font-bold hover:bg-blue-700 transition-colors shadow-md active:scale-[0.98]"
+                >
+                  マイページへ
+                </button>
+              </div>
+            )}
+
+            {status === 'error' && (
+              <div className="py-6 flex flex-col items-center text-center">
+                <div className="w-16 h-16 bg-red-100 rounded-full flex items-center justify-center mb-6 text-red-500">
+                  <svg className="w-8 h-8" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
+                    <path strokeLinecap="round" strokeLinejoin="round" d="M6 18L18 6M6 6l12 12" />
+                  </svg>
+                </div>
+                <h3 className="text-lg font-bold text-gray-800 mb-2">エラー</h3>
+                <p className="text-gray-600 mb-6 font-medium bg-red-50 px-4 py-2 rounded text-xs w-full break-all">
+                  {message}
+                </p>
+                
+                <div className="flex flex-col gap-3 w-full">
+                  <button 
+                    onClick={() => setStatus('scan_mode')} 
+                    className="w-full bg-slate-800 text-white py-3 rounded-lg font-bold hover:bg-slate-700 transition-colors shadow-sm active:scale-[0.98]"
+                  >
+                    再読み込み
+                  </button>
+                  <button 
+                    onClick={() => router.push('/mypage')}
+                    className="w-full bg-white border border-gray-200 text-gray-500 py-3 rounded-lg font-bold hover:bg-gray-50 transition-colors text-sm active:scale-[0.98]"
+                  >
+                    戻る
+                  </button>
+                </div>
+              </div>
+            )}
+
+          </div>
+        </div>
+
+        <footer className="mt-6 text-gray-400 text-[10px] text-center">
+          &copy; Shizuoka Connect.
+        </footer>
+      </main>
+    </div>
+  )
+}
+
+export default function CheckInPage() {
+  return (
+    <Suspense fallback={<div className="min-h-[100dvh] flex items-center justify-center bg-gray-50">Loading...</div>}>
+      <CheckInContent />
+    </Suspense>
+  )
+}
+</file>
+
+<file path="app/mypage/page.tsx">
+'use client'
+
+import { useEffect, useState } from 'react'
+import { supabase } from '../lib/supabaseClient'
+import { useRouter } from 'next/navigation'
+import Link from 'next/link'
+import { Session } from '@supabase/supabase-js'
+
+// ★管理者として許可するメールアドレス
+const ADMIN_EMAILS = [
+  'admin@test.com', 
+  'campustocommunityshizuoka@gmail.com'
+]
+
+// データ型の定義
+type Participation = {
+  id: number
+  event_id: number
+  checked_in_at: string
+}
+
+type EventData = {
+  id: number
+  name: string
+}
+
+type HistoryItem = {
+  eventName: string
+  date: string
+  time: string
+}
+
+export default function MyPage() {
+  const [loading, setLoading] = useState(true)
+  const [session, setSession] = useState<Session | null>(null)
+  const [userEmail, setUserEmail] = useState('')
+  const [history, setHistory] = useState<HistoryItem[]>([])
+  const [participationCount, setParticipationCount] = useState(0) // ★追加: 参加回数用のステート
+  const router = useRouter()
+
+  useEffect(() => {
+    const init = async () => {
+      // 1. ユーザーセッション確認
+      const { data: { session } } = await supabase.auth.getSession()
+      if (!session || !session.user) {
+        router.push('/login')
+        return
+      }
+      setSession(session)
+      setUserEmail(session.user.email || '')
+
+      // 2. 参加履歴の取得
+      const { data: participations, error: pError } = await supabase
+        .from('participations')
+        .select('*')
+        .eq('user_id', session.user.id)
+        .order('checked_in_at', { ascending: false })
+
+      if (pError) {
+        console.error('Error fetching participations:', pError)
+      } else if (participations && participations.length > 0) {
+        
+        // ★追加: 参加回数をセット
+        setParticipationCount(participations.length)
+
+        // 3. イベント情報の取得
+        const eventIds = Array.from(new Set(participations.map((p: Participation) => p.event_id)))
+        
+        // ★修正: テーブル名を 'event-app' に変更（前回の修正に合わせました）
+        const { data: events } = await supabase
+          .from('event-app') 
+          .select('id, name')
+          .in('id', eventIds)
+
+        // 4. データ結合
+        const formattedHistory: HistoryItem[] = participations.map((p: Participation) => {
+          const event = events?.find((e: EventData) => e.id === p.event_id)
+          const dateObj = new Date(p.checked_in_at)
+          return {
+            eventName: event ? event.name : 'Unknown Event',
+            date: dateObj.toLocaleDateString('ja-JP'),
+            time: dateObj.toLocaleTimeString('ja-JP', { hour: '2-digit', minute: '2-digit' }),
+          }
+        })
+        setHistory(formattedHistory)
+      } else {
+        // 参加履歴がない場合
+        setParticipationCount(0)
+      }
+      setLoading(false)
+    }
+
+    init()
+  }, [router])
+
+  const handleLogout = async () => {
+    await supabase.auth.signOut()
+    router.push('/login')
+  }
+
+  // 管理者かどうか判定する関数
+  const isAdmin = (email?: string) => {
+    if (!email) return false
+    return ADMIN_EMAILS.includes(email)
+  }
+
+  // --- ローディング表示 ---
+  if (loading) {
+    return (
+      <div className="min-h-[100dvh] flex items-center justify-center bg-gray-50">
+        <div className="animate-pulse flex flex-col items-center gap-2">
+          <div className="w-8 h-8 border-4 border-blue-200 border-t-blue-600 rounded-full animate-spin"></div>
+          <span className="text-gray-400 text-xs">読み込み中...</span>
+        </div>
+      </div>
+    )
+  }
+
+  return (
+    <div className="min-h-[100dvh] bg-gray-50 flex flex-col font-sans text-gray-900">
+      
+      {/* ヘッダー */}
+      <header className="w-full bg-white shadow-sm border-b border-gray-200 sticky top-0 z-10">
+        <div className="max-w-4xl mx-auto px-4 py-3 flex items-center justify-between">
+          <div className="flex items-center gap-2">
+            <img src="/logo.png" alt="Logo" className="h-8 w-auto object-contain sm:h-10" />
+            <h1 className="text-base font-bold text-blue-600 tracking-wide hidden sm:block">
+              しずおかコネクト
+            </h1>
+          </div>
+          <button 
+            onClick={handleLogout}
+            className="text-[10px] font-medium text-gray-500 hover:text-red-500 border border-gray-200 px-3 py-1.5 rounded-full transition-colors active:bg-gray-100"
+          >
+            ログアウト
+          </button>
+        </div>
+      </header>
+
+      {/* メインコンテンツ */}
+      <main className="flex-grow w-full max-w-md mx-auto p-4 flex flex-col gap-4">
+        
+        {/* ユーザー情報と参加回数表示エリア */}
+        <div className="bg-white rounded-2xl shadow-sm border border-gray-100 p-5">
+          <div className="flex items-center gap-4 mb-4">
+            <div className="w-12 h-12 bg-gray-100 rounded-full flex items-center justify-center text-gray-500 font-bold text-xl">
+              {userEmail.charAt(0).toUpperCase()}
+            </div>
+            <div className="flex-grow overflow-hidden">
+              <p className="text-xs text-gray-400">Account</p>
+              <p className="text-sm font-bold text-gray-800 truncate">{userEmail}</p>
+              <Link href="/update-password" className="text-[10px] text-blue-500 hover:underline">
+                 パスワード変更
+               </Link>
+            </div>
+          </div>
+
+          <div className="h-px bg-gray-100 w-full mb-4"></div>
+
+          {/* ★★★ 参加回数の強調表示 ★★★ */}
+          <div className="flex items-center justify-between bg-blue-50 rounded-xl p-4 border border-blue-100">
+            <div>
+              <p className="text-xs font-bold text-blue-400 uppercase tracking-wider mb-1">Total Check-ins</p>
+              <p className="text-gray-600 text-[10px]">これまでのイベント参加数</p>
+            </div>
+            <div className="flex items-baseline gap-1">
+              <span className="text-3xl font-bold text-blue-600 font-mono tracking-tighter">
+                {participationCount}
+              </span>
+              <span className="text-sm font-bold text-blue-400">回</span>
+            </div>
+          </div>
+        </div>
+
+        {/* 管理者メニュー（条件付き表示） */}
+        {isAdmin(userEmail) && (
+          <div className="animate-fade-in-up">
+            <Link 
+              href="/admin/qr"
+              className="block w-full bg-slate-800 text-white p-4 rounded-xl shadow-lg hover:bg-slate-700 transition-all active:scale-[0.98] flex items-center justify-between group"
+            >
+              <div className="flex items-center gap-3">
+                <span className="text-2xl">🔐</span>
+                <div className="text-left">
+                  <p className="text-[10px] text-slate-300 font-bold">管理者メニュー</p>
+                  <p className="text-sm font-bold">QRコード管理画面へ</p>
+                </div>
+              </div>
+              <span className="text-slate-400 group-hover:translate-x-1 transition-transform">→</span>
+            </Link>
+          </div>
+        )}
+
+        {/* チェックインボタン */}
+        <div className="bg-gradient-to-br from-blue-600 to-blue-700 rounded-2xl shadow-lg p-6 text-center text-white relative overflow-hidden">
+          {/* 背景の装飾 */}
+          <div className="absolute -top-12 -right-12 w-40 h-40 bg-white/10 rounded-full blur-3xl"></div>
+          <div className="absolute -bottom-12 -left-12 w-40 h-40 bg-blue-400/20 rounded-full blur-3xl"></div>
+
+          <h2 className="text-lg font-bold mb-1 relative z-10">イベントに参加する</h2>
+          <p className="text-blue-100 text-xs mb-6 relative z-10">会場のQRコードを読み取ってチェックイン</p>
+          
+          <Link 
+            href="/checkin"
+            className="block w-full bg-white text-blue-600 py-3.5 rounded-xl font-bold shadow-md hover:bg-blue-50 transition-colors active:scale-[0.98] relative z-10 flex items-center justify-center gap-2"
+          >
+            <svg xmlns="http://www.w3.org/2000/svg" className="h-5 w-5" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
+              <path strokeLinecap="round" strokeLinejoin="round" d="M12 4v1m6 11h2m-6 0h-2v4m0-11v3m0 0h.01M12 14.5v.01M12 18.5v.01M12 10.5v.01M16 14.5v.01M16 18.5v.01M8 14.5v.01M8 18.5v.01M8 10.5v.01M12 6.5v.01M16 6.5v.01M8 6.5v.01" />
+            </svg>
+            カメラを起動する
+          </Link>
+        </div>
+
+        {/* 参加履歴リスト */}
+        <div className="bg-white rounded-2xl shadow-sm border border-gray-100 overflow-hidden flex-grow flex flex-col">
+          <div className="p-4 border-b border-gray-50 bg-gray-50/50">
+            <h3 className="font-bold text-gray-700 text-sm flex items-center gap-2">
+              <svg xmlns="http://www.w3.org/2000/svg" className="h-4 w-4 text-blue-500" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 8v4l3 3m6-3a9 9 0 11-18 0 9 9 0 0118 0z" />
+              </svg>
+              最近の参加履歴
+            </h3>
+          </div>
+          
+          <div className="divide-y divide-gray-50">
+            {history.length === 0 ? (
+              <div className="p-8 text-center text-gray-400 text-xs">
+                まだ参加履歴がありません
+              </div>
+            ) : (
+              history.map((item, index) => (
+                <div key={index} className="p-4 hover:bg-gray-50 transition-colors flex items-center justify-between">
+                  <div>
+                    <p className="font-bold text-gray-800 text-sm">{item.eventName}</p>
+                    <p className="text-xs text-gray-400 mt-1">{item.date}</p>
+                  </div>
+                  <span className="text-xs font-medium text-blue-600 bg-blue-50 px-2 py-1 rounded">
+                    {item.time}
+                  </span>
+                </div>
+              ))
+            )}
+          </div>
+        </div>
+
+      </main>
+
+      <footer className="p-6 text-gray-300 text-[10px] text-center">
+        &copy; Shizuoka Connect.
+      </footer>
+    </div>
+  )
+}
+</file>
+
+<file path="app/page.tsx">
+'use client'
+
+import { useEffect, useState } from 'react'
+import { supabase } from './lib/supabaseClient'
+import Link from 'next/link'
+import { Session } from '@supabase/supabase-js'
+
+export default function Home() {
+  const [session, setSession] = useState<Session | null>(null)
+  const [loading, setLoading] = useState(true)
+
+  useEffect(() => {
+    // 初回ロード時にログイン状態を確認
+    supabase.auth.getSession().then(({ data: { session } }) => {
+      setSession(session)
+      setLoading(false)
+    })
+
+    // ログイン状態の変化を監視
+    const {
+      data: { subscription },
+    } = supabase.auth.onAuthStateChange((_event, session) => {
+      setSession(session)
+    })
+
+    return () => subscription.unsubscribe()
+  }, [])
+
+  return (
+    <div className="min-h-[100dvh] bg-gradient-to-b from-slate-50 to-white flex flex-col font-sans text-gray-900">
+      
+      {/* ヘッダー: スクロールしても追従するスティッキーヘッダー */}
+      <header className="w-full bg-white/80 backdrop-blur-md shadow-sm border-b border-gray-100 sticky top-0 z-50">
+        <div className="max-w-4xl mx-auto px-4 py-3 flex items-center justify-between">
+          <div className="flex items-center gap-2">
+            <img 
+              src="/logo.png" 
+              alt="Logo" 
+              className="h-8 w-auto object-contain sm:h-10"
+            />
+            <h1 className="text-base font-bold text-blue-600 tracking-wide">
+              しずおかコネクト
+            </h1>
+          </div>
+          {/* ログイン済みならヘッダーにもマイページリンクを表示（PCなどで便利） */}
+          {!loading && session && (
+            <Link 
+              href="/mypage" 
+              className="text-[10px] font-bold text-blue-600 border border-blue-100 bg-blue-50 px-3 py-1.5 rounded-full hover:bg-blue-100 transition-colors"
+            >
+              マイページ &rarr;
+            </Link>
+          )}
+        </div>
+      </header>
+
+      {/* メインコンテンツ */}
+      <main className="flex-grow flex flex-col items-center justify-center p-6 w-full max-w-md mx-auto relative">
+        
+        {/* 背景装飾（さりげなく） */}
+        <div className="absolute top-10 left-10 w-40 h-40 bg-blue-200 rounded-full blur-3xl opacity-20 pointer-events-none"></div>
+        <div className="absolute bottom-10 right-10 w-60 h-60 bg-indigo-200 rounded-full blur-3xl opacity-20 pointer-events-none"></div>
+
+        {/* ヒーローセクション */}
+        <div className="flex flex-col items-center text-center z-10 w-full">
+          
+          {/* ロゴを大きく表示 */}
+          <div className="mb-8 relative">
+            <div className="absolute inset-0 bg-blue-500 blur-2xl opacity-10 rounded-full"></div>
+            <img 
+              src="/logo.png" 
+              alt="Shizuoka Connect Logo" 
+              className="relative w-32 h-32 object-contain drop-shadow-lg"
+            />
+          </div>
+
+          <h1 className="text-3xl font-extrabold text-slate-800 leading-tight mb-4 tracking-tight">
+            イベント参加を、<br />
+            もっと<span className="text-blue-600">スマート</span>に。
+          </h1>
+          
+          <p className="text-sm text-gray-500 mb-10 leading-relaxed max-w-xs mx-auto">
+            しずおかコネクト公式チェックインアプリ。<br/>
+            QRコードをかざすだけで、<br/>
+            スムーズに入場・履歴管理ができます。
+          </p>
+
+          {/* アクションボタンエリア */}
+          <div className="w-full flex flex-col gap-4">
+            {loading ? (
+              // ローディング中
+              <div className="w-full h-14 bg-gray-100 rounded-xl animate-pulse flex items-center justify-center text-gray-400 text-sm">
+                読み込み中...
+              </div>
+            ) : session ? (
+              // ログイン済みの場合
+              <div className="flex flex-col gap-3 animate-fade-in-up">
+                <Link 
+                  href="/mypage"
+                  className="w-full bg-blue-600 text-white py-4 rounded-xl font-bold shadow-lg shadow-blue-200 hover:bg-blue-700 hover:shadow-xl transition-all active:scale-[0.98] flex items-center justify-center gap-2 group"
+                >
+                  <span>マイページを開く</span>
+                  <svg xmlns="http://www.w3.org/2000/svg" className="h-5 w-5 transition-transform group-hover:translate-x-1" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M13 7l5 5m0 0l-5 5m5-5H6" />
+                  </svg>
+                </Link>
+                <p className="text-xs text-gray-400 mt-2">
+                  ログイン中: {session.user.email}
+                </p>
+              </div>
+            ) : (
+              // 未ログインの場合
+              <div className="flex flex-col gap-3 animate-fade-in-up">
+                <Link 
+                  href="/login"
+                  className="w-full bg-blue-600 text-white py-4 rounded-xl font-bold shadow-lg shadow-blue-200 hover:bg-blue-700 hover:shadow-xl transition-all active:scale-[0.98] text-center"
+                >
+                  はじめる (ログイン・登録)
+                </Link>
+                
+                <div className="mt-4 grid grid-cols-2 gap-3 text-left">
+                   <div className="bg-white p-3 rounded-lg border border-gray-100 shadow-sm flex flex-col items-center text-center">
+                      <span className="text-2xl mb-1">📱</span>
+                      <span className="text-[10px] text-gray-500 font-bold">簡単チェックイン</span>
+                   </div>
+                   <div className="bg-white p-3 rounded-lg border border-gray-100 shadow-sm flex flex-col items-center text-center">
+                      <span className="text-2xl mb-1">📅</span>
+                      <span className="text-[10px] text-gray-500 font-bold">履歴が残る</span>
+                   </div>
+                </div>
+              </div>
+            )}
+          </div>
+        </div>
+      </main>
+
+      {/* フッター */}
+      <footer className="py-6 text-center border-t border-gray-100 bg-white/50 backdrop-blur-sm">
+        <p className="text-[10px] text-gray-400">
+          &copy; 2025 Shizuoka Connect.<br/>All rights reserved.
+        </p>
+      </footer>
+    </div>
+  )
+}
+</file>
+
+<file path="tsconfig.json">
+{
+  "compilerOptions": {
+    "target": "ES2017",
+    "lib": [
+      "dom",
+      "dom.iterable",
+      "esnext"
+    ],
+    "allowJs": true,
+    "skipLibCheck": true,
+    "strict": true,
+    "noEmit": true,
+    "esModuleInterop": true,
+    "module": "esnext",
+    "moduleResolution": "bundler",
+    "resolveJsonModule": true,
+    "isolatedModules": true,
+    "jsx": "preserve",
+    "incremental": true,
+    "plugins": [
+      {
+        "name": "next"
+      }
+    ],
+    "paths": {
+      "@/*": [
+        "./*"
+      ]
+    }
+  },
+  "include": [
+    "next-env.d.ts",
+    "**/*.ts",
+    "**/*.tsx",
+    ".next/types/**/*.ts",
+    ".next/dev/types/**/*.ts",
+    "**/*.mts"
+  ],
+  "exclude": [
+    "node_modules"
+  ]
+}
+</file>
+
+<file path="app/reset-password/page.tsx">
+'use client'
+
+import { useState } from 'react'
+import { supabase } from '../lib/supabaseClient'
+import Link from 'next/link'
+
+export default function ResetPasswordPage() {
+  const [email, setEmail] = useState('')
+  const [message, setMessage] = useState('')
+  const [loading, setLoading] = useState(false)
+
+  const handleReset = async (e: React.FormEvent) => {
+    e.preventDefault()
+    setLoading(true)
+    setMessage('')
+
+    // ★修正箇所: callbackルートを経由させる
+    // 認証コードを交換してから update-password ページへ遷移させます
+    const { error } = await supabase.auth.resetPasswordForEmail(email, {
+      redirectTo: `https://event-app.shizuoka-connect.com/auth/callback?next=/update-password`, 
+    })
+
+    if (error) {
+      setMessage('エラー: ' + error.message)
+    } else {
+      setMessage('再設定用のメールを送信しました。メールボックスを確認してください。')
+    }
+    setLoading(false)
+  }
+
+  return (
+    <div className="min-h-[100dvh] bg-gray-50 flex flex-col font-sans text-gray-900">
+      
+      <header className="w-full bg-white shadow-sm border-b border-gray-200 sticky top-0 z-10">
+        <div className="max-w-4xl mx-auto px-4 py-3 flex items-center justify-between">
+          <div className="flex items-center gap-2">
+            <img 
+              src="/logo.png" 
+              alt="Logo" 
+              className="h-8 w-auto object-contain sm:h-10"
+            />
+            <h1 className="text-base font-bold text-blue-600 tracking-wide hidden sm:block">
+              しずおかコネクト
+            </h1>
+          </div>
+          <span className="text-[10px] sm:text-xs font-medium bg-blue-50 text-blue-600 px-3 py-1 rounded-full border border-blue-100">
+            パスワード再設定
+          </span>
+        </div>
+      </header>
+
+      <main className="flex-grow flex flex-col items-center justify-center p-4">
+        <div className="w-full max-w-md bg-white rounded-2xl shadow-xl overflow-hidden border border-gray-100">
+          
+          <div className="bg-blue-600 p-6 text-center">
+            <h2 className="text-xl font-bold text-white tracking-tight">
+              パスワードをお忘れの方
+            </h2>
+            <p className="text-blue-100 text-xs mt-2 opacity-90">
+              登録メールアドレスを入力してください
+            </p>
+          </div>
+
+          <div className="p-6 sm:p-8">
+            
+            {message && (
+              <div className={`mb-6 p-4 rounded-lg text-sm border ${
+                message.includes('エラー') 
+                  ? 'bg-red-50 text-red-600 border-red-100' 
+                  : 'bg-green-50 text-green-600 border-green-100'
+              }`}>
+                {message}
+              </div>
+            )}
+
+            <form onSubmit={handleReset} className="flex flex-col gap-5">
+              <div>
+                <label className="mb-1 block text-sm font-medium text-gray-700">
+                  メールアドレス
+                </label>
+                <input
+                  type="email"
+                  value={email}
+                  onChange={(e) => setEmail(e.target.value)}
+                  required
+                  className="w-full rounded-lg border border-gray-300 bg-gray-50 p-3 text-base outline-none transition focus:bg-white focus:border-blue-500 focus:ring-2 focus:ring-blue-100"
+                  placeholder="name@example.com"
+                />
+              </div>
+
+              <div className="flex flex-col gap-3 mt-2">
+                <button
+                  type="submit"
+                  disabled={loading}
+                  className="w-full rounded-lg bg-blue-600 py-3.5 font-bold text-white shadow-md transition hover:bg-blue-700 disabled:opacity-50 active:scale-[0.98] text-sm sm:text-base"
+                >
+                  {loading ? '送信中...' : '再設定メールを送る'}
+                </button>
+
+                <Link 
+                  href="/login" 
+                  className="w-full rounded-lg bg-white border border-gray-200 py-3.5 font-bold text-gray-500 shadow-sm transition hover:bg-gray-50 text-center active:scale-[0.98] text-sm sm:text-base"
+                >
+                  ログイン画面に戻る
+                </Link>
+              </div>
+            </form>
+          </div>
+        </div>
+
+        <footer className="mt-8 text-gray-400 text-[10px] text-center">
+          &copy; Shizuoka Connect. All rights reserved.
+        </footer>
+      </main>
+    </div>
+  )
+}
+</file>
+
+<file path="package.json">
+{
+  "name": "event-app",
+  "version": "0.1.0",
+  "private": true,
+  "scripts": {
+    "dev": "next dev",
+    "build": "next build",
+    "start": "next start",
+    "lint": "eslint",
+    "pages:build": "npx @cloudflare/next-on-pages"
+  },
+  "dependencies": {
+    "@supabase/ssr": "^0.8.0",
+    "@supabase/supabase-js": "^2.87.1",
+    "@yudiel/react-qr-scanner": "^2.4.1",
+    "next": "^15.0.3",
+    "qrcode.react": "^4.2.0",
+    "react": "^18.3.1",
+    "react-dom": "^18.3.1",
+    "react-qr-code": "^2.0.18"
+  },
+  "devDependencies": {
+    "@cloudflare/next-on-pages": "^1.13.16",
+    "@tailwindcss/postcss": "^4",
+    "@types/node": "^20",
+    "@types/react": "^19",
+    "@types/react-dom": "^19",
+    "eslint": "^9",
+    "eslint-config-next": "16.0.10",
+    "tailwindcss": "^4",
+    "typescript": "^5"
+  }
+}
+</file>
+
+<file path="app/auth/callback/route.ts">
+import { createServerClient, type CookieOptions } from '@supabase/ssr'
+import { cookies } from 'next/headers'
+import { NextResponse } from 'next/server'
+
+export const runtime = 'edge'
+
+// Supabase認証コールバック処理
+export async function GET(request: Request) {
+  const { searchParams, origin } = new URL(request.url)
+  const code = searchParams.get('code')
+  // ログイン後の移動先（指定がなければトップページへ）
+  const next = searchParams.get('next') ?? '/'
+
+  if (code) {
+    const cookieStore = await cookies()
+
+    // サーバー側でSupabaseを操作するためのクライアントを作成
+    const supabase = createServerClient(
+      process.env.NEXT_PUBLIC_SUPABASE_URL!,
+      process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY!,
+      {
+        cookies: {
+          get(name: string) {
+            return cookieStore.get(name)?.value
+          },
+          set(name: string, value: string, options: CookieOptions) {
+            cookieStore.set({ name, value, ...options })
+          },
+          remove(name: string, options: CookieOptions) {
+            cookieStore.delete({ name, ...options })
+          },
+        },
+      }
+    )
+    
+    // コードを使ってセッションを交換（ログイン確立）
+    const { error } = await supabase.auth.exchangeCodeForSession(code)
+    
+    if (!error) {
+      // 認証成功時：指定されたページへ移動
+      return NextResponse.redirect(`${origin}${next}`)
+    } else {
+      // 認証エラー時：エラー内容を持ってエラー画面へ
+      console.error('Auth Error:', error)
+      return NextResponse.redirect(`${origin}/auth/auth-code-error?error_description=${encodeURIComponent(error.message)}`)
+    }
+  }
+
+  // ▼▼▼ 修正箇所：コードがない場合の処理 ▼▼▼
+  // コードがない場合、Implicit Flow（ハッシュ形式 #access_token=...）の可能性があります。
+  // サーバーはハッシュを読めませんが、そのまま遷移先（next）へリダイレクトすることで
+  // ブラウザがハッシュを維持したまま次のページへ渡してくれます。
+  // これにより、クライアント側（update-password画面）で認証が可能になります。
+  return NextResponse.redirect(`${origin}${next}`)
+}
+</file>
+
+</files>
