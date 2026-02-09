@@ -75,14 +75,13 @@ export default function MyPage() {
       setIsAdmin(adminFlag)
 
       // 1. 外部イベント一覧取得
-      // 修正: 開催日が近い順で、最大10件取得
       const today = new Date().toISOString().split('T')[0]
       const { data: eventData } = await eventSupabase
         .from('events')
         .select('id, title, event_date, image_url, area')
         .gte('event_date', today)
         .order('event_date', { ascending: true })
-        .limit(10) // ★修正: 最大10件
+        .limit(10)
       
       setFetchedEvents(eventData || [])
 
@@ -103,13 +102,16 @@ export default function MyPage() {
 
           const eventIds = Array.from(new Set(participations.map((p: Participation) => p.event_id)))
           
+          // ★修正: 履歴用のデータ取得でも型定義に合わせて全カラムを取得
           const { data: historyEventDetails } = await eventSupabase
             .from('events') 
-            .select('id, title, event_date')
+            .select('id, title, event_date, image_url, area')
             .in('id', eventIds)
 
           const formattedHistory: HistoryItem[] = participations.map((p: Participation) => {
-            const event = historyEventDetails?.find((e: ExternalEvent) => e.id === p.event_id)
+            // ★修正: (e: ExternalEvent) という型注釈を削除し、(e)のみに変更
+            // Supabaseから返ってくるデータ型をそのまま使うことでエラーを回避
+            const event = historyEventDetails?.find((e) => e.id === p.event_id)
             const checkInDate = new Date(p.checked_in_at)
             return {
               eventName: event ? event.title : `イベント (ID:${p.event_id})`,
@@ -153,6 +155,7 @@ export default function MyPage() {
       <div className="min-h-screen bg-gray-50 flex flex-col font-sans text-gray-900">
         <header className="bg-white shadow-sm sticky top-0 z-10 px-4 py-3 flex justify-between items-center">
           <div className="flex items-center gap-2">
+            {/* eslint-disable-next-line @next/next/no-img-element */}
             <img src="/logo.png" alt="Logo" className="h-8 w-auto object-contain" />
             <span className="text-sm font-bold text-blue-600">管理者</span>
           </div>
@@ -202,7 +205,7 @@ export default function MyPage() {
         {activeTab === 'home' && (
           <div className="flex flex-col gap-4 animate-fade-in-up">
             
-            {/* 1. ユーザー情報 (シンプル化: アイコン削除) */}
+            {/* 1. ユーザー情報 */}
             <div className="bg-white rounded-2xl p-4 shadow-sm border border-gray-100 flex items-center justify-between">
               <div>
                 <p className="text-[10px] text-gray-400 font-medium">Welcome back,</p>
@@ -246,7 +249,7 @@ export default function MyPage() {
                   style={{ width: `${calculateProgressWidth()}%` }}
                 ></div>
 
-                {/* ランクノード (修正: 数字を表示) */}
+                {/* ランクノード */}
                 <div className="relative z-10 flex justify-between w-full">
                   {RANKS.map((rank) => {
                     const isReached = participationCount >= rank.threshold
@@ -307,7 +310,7 @@ export default function MyPage() {
 
                     <div className="p-3 flex flex-col flex-grow">
                       <span className="text-[10px] font-bold text-gray-500 bg-gray-50 px-2 py-0.5 rounded self-start mb-1.5 border border-gray-100">
-                         {new Date(event.event_date).toLocaleDateString()}
+                          {new Date(event.event_date).toLocaleDateString()}
                       </span>
                       <h3 className="line-clamp-2 text-xs font-bold text-gray-800 leading-snug group-hover:text-blue-600 transition-colors">
                         {event.title}
@@ -326,7 +329,7 @@ export default function MyPage() {
           </div>
         )}
 
-        {/* --- 履歴タブ (既存維持) --- */}
+        {/* --- 履歴タブ --- */}
         {activeTab === 'history' && (
           <div className="animate-fade-in-up">
             <h2 className="mb-4 px-1 text-lg font-bold text-gray-800">参加履歴</h2>
