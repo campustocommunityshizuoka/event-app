@@ -20,7 +20,7 @@ function getPkcs8Der(privateKeyBase64: string, publicKeyBase64: string): Uint8Ar
   return der
 }
 
-// eslint-disable-next-line @typescript-eslint/no-explicit-any
+// ★修正: ここにあった不要な eslint-disable を削除
 async function signVapidKey(endpoint: string) {
   const privateKey = process.env.VAPID_PRIVATE_KEY!
   const publicKey = process.env.NEXT_PUBLIC_VAPID_PUBLIC_KEY!

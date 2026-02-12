@@ -84,8 +84,8 @@ async function parseRss(url: string): Promise<{ items: RssItem[] }> {
     })
 
     return { items }
-  } catch (e) {
-    console.error('RSS Parse Error:', e)
+  } catch (_e) { // ★修正: _e に変更
+    console.error('RSS Parse Error:', _e)
     return { items: [] }
   }
 }
@@ -163,7 +163,7 @@ export async function POST(request: Request) {
           items = feed.items
           logs.push(`  ✅ RSS: ${items.length}件`)
         }
-      } catch (e) { 
+      } catch (_e) { // ★修正: _e に変更
         logs.push(`  ℹ️ RSS失敗`) 
       }
 
@@ -201,7 +201,7 @@ export async function POST(request: Request) {
           items = Array.from(uniqueItems.values())
           
           if (items.length > 0) logs.push(`  ✅ HTML: ${items.length}件`)
-        } catch (err) { 
+        } catch (_err) { // ★修正: _err に変更
           /* 無視 */ 
         }
       }

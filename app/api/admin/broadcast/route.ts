@@ -32,13 +32,17 @@ export async function POST(request: Request) {
     let successCount = 0
     
     // 並列処理で高速化
+    // 戻り値を number として扱うために型アサーション等は不要ですが、
+    // 次の reduce で明示的に型を指定します。
     const promises = uniqueUserIds.map(userId => 
       sendPushNotification(userId, title, body, url || '/mypage')
         .then(res => res.success ? 1 : 0)
     )
 
     const results = await Promise.all(promises)
-    successCount = results.reduce((a, b) => a + b, 0)
+    
+    // ★修正箇所: アキュムレータ(a)を明示的に number 型にする
+    successCount = results.reduce((a: number, b) => a + b, 0)
 
     console.log(`Broadcast Complete. Success count: ${successCount}`)
     return NextResponse.json({ success: true, count: successCount })
