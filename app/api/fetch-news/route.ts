@@ -129,8 +129,11 @@ export async function POST(request: Request) {
   let totalFound = 0
 
   try {
+    // デバッグ用: 環境変数の存在チェック（値は出さない）
     if (!process.env.SUPABASE_SERVICE_ROLE_KEY) {
-      logs.push('⚠️ 警告: SUPABASE_SERVICE_ROLE_KEY設定なし')
+      logs.push('⚠️ 警告: SUPABASE_SERVICE_ROLE_KEY が読み込めていません (ANON_KEYを使用中)')
+    } else {
+      logs.push('ℹ️ 情報: SUPABASE_SERVICE_ROLE_KEY は存在します')
     }
 
     // DBから監視対象リストを取得
@@ -216,7 +219,9 @@ export async function POST(request: Request) {
 
         if (!existing) {
           const imageUrl = item.image || feedConfig.default_image
-          await supabaseAdmin.from('news_feeds').insert({
+          
+          // ★修正: エラーハンドリングを追加
+          const { error: insertError } = await supabaseAdmin.from('news_feeds').insert({
             title: item.title,
             link_url: item.link,
             content: item.content?.substring(0, 200) || '',
@@ -224,14 +229,20 @@ export async function POST(request: Request) {
             published_at: item.pubDate,
             image_url: imageUrl
           })
-          addedCount++
+
+          if (insertError) {
+            logs.push(`❌ 保存失敗: ${item.title} - ${insertError.message}`)
+            console.error('Insert Error:', insertError)
+          } else {
+            addedCount++
+          }
         }
       }
     }
 
     return NextResponse.json({ 
       success: true, 
-      message: `成功: ${addedCount}件追加 (全${totalFound}件)`,
+      message: `処理完了: ${addedCount}件追加 (全${totalFound}件検出 / エラーは詳細ログを確認)`,
       details: logs
     })
 
