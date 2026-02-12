@@ -1,26 +1,31 @@
 // public/sw.js
+// Version 1.0.1
 
 self.addEventListener('push', function (event) {
-  if (event.data) {
-    const data = event.data.json()
-    const options = {
-      body: data.body,
-      icon: '/logo.png',
-      badge: '/logo.png',
-      vibrate: [100, 50, 100],
-      data: {
-        dateOfArrival: Date.now(),
-        primaryKey: '2',
-      },
-    }
-    event.waitUntil(self.registration.showNotification(data.title, options))
-  }
-})
 
-self.addEventListener('notificationclick', function (event) {
-  event.notification.close()
-  event.waitUntil(
-    // 通知をクリックしたらマイページを開く
-    clients.openWindow('/mypage')
-  )
-})
+  console.log('Push received!'); // スマホをPCに繋いでいればログで見えます
+  
+  const promise = self.registration.pushManager.getSubscription()
+    .then(subscription => {
+      if (!subscription) throw new Error('No subscription found');
+      
+      const endpoint = encodeURIComponent(subscription.endpoint);
+      // ★絶対パスで指定することを確認
+      return fetch(`/api/push/get-message?endpoint=${endpoint}`);
+    })
+  // ...（以下、
+    .then(res => res.json())
+    .then(data => {
+      // 3. APIから届いたタイトルと本文を表示
+      return self.registration.showNotification(data.title || 'しずおかコネクト', {
+        body: data.body || '新着のお知らせがあります', // データがない時の予備
+        icon: '/logo.png',
+        badge: '/logo.png',
+      });
+    })
+    .catch(err => {
+      console.error('Push fetch error:', err);
+    });
+
+  event.waitUntil(promise);
+});

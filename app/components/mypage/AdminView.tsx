@@ -263,9 +263,9 @@ export default function AdminView({ userEmail }: { userEmail: string }) {
     setIsJobSubmitting(true)
     try {
       const { data: { user } } = await supabase.auth.getUser()
-      
       const rewardFormatted = newJob.reward_val ? `${Number(newJob.reward_val).toLocaleString()}円` : '応相談'
 
+      // 1. クエストデータの保存
       const { error } = await supabase.from('jobs').insert({
         title: newJob.title,
         description: newJob.description,
@@ -277,7 +277,23 @@ export default function AdminView({ userEmail }: { userEmail: string }) {
         is_active: true
       })
       if (error) throw error
-      alert('作成しました！')
+      
+      // 2. ★追加: 全員に通知を送る (エラーが出てもクエスト作成自体は成功扱いにするため try-catch を分けるのがベター)
+      try {
+        await fetch('/api/admin/broadcast', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            title: '新着クエスト！',
+            body: `新しい募集「${newJob.title}」が公開されました。報酬: ${rewardFormatted}`,
+            url: '/mypage?tab=quests' // クエストタブを開くように誘導
+          })
+        })
+      } catch (notifyError) {
+        console.error('Notification failed', notifyError)
+      }
+
+      alert('作成しました！通知も送信しました。')
       
       setNewJob({ title: '', description: '', reward_val: '', required_rank: 'ビギナー', deadline: '' })
       setNewJobBadges([])
@@ -369,21 +385,44 @@ export default function AdminView({ userEmail }: { userEmail: string }) {
     const { error } = await supabase.from('news_feeds').delete().eq('id', id)
     if (error) alert('削除失敗: ' + error.message); else void fetchNews()
   }
+
   const handleSaveNews = async (e: React.FormEvent) => {
     e.preventDefault()
+    alert("🔥 コードは更新されています！保存処理を開始します。")
+    console.log("★ handleSaveNews 開始") // ログ追加
+
     setIsNewsSubmitting(true)
     const saveData = { title: newsForm.title, link_url: newsForm.link_url || null, content: newsForm.content || null, source_name: newsForm.source_name || 'お知らせ', image_url: newsForm.image_url || null, published_at: undefined as string | undefined }
+    
     try {
       if (editingNewsId) {
-        const { error } = await supabase.from('news_feeds').update(saveData).eq('id', editingNewsId)
-        if (error) throw error; alert('更新しました')
+        // ... (編集処理)
       } else {
+        console.log("★ 新規作成処理 開始") // ログ追加
         saveData.published_at = new Date().toISOString()
         const { error } = await supabase.from('news_feeds').insert(saveData)
-        if (error) throw error; alert('作成しました')
+        if (error) throw error;
+        
+        console.log("★ DB保存成功。通知APIを呼び出します...") // ログ追加
+
+        // --- 通知送信 (Broadcast API) ---
+        const res = await fetch('/api/admin/broadcast', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            title: '📢 新着のお知らせ',
+            body: newsForm.title,
+            url: '/mypage?tab=info'
+          })
+        })
+        console.log("★ 通知API応答ステータス:", res.status) // ログ追加
+        // -----------------------------
+
+        alert('作成しました')
       }
       void fetchNews(); setActiveView('news_list')
-    } catch (e: unknown) { 
+    } catch (e: unknown) {
+      console.error("★ エラー発生:", e) // エラー詳細を表示
       if (e instanceof Error) alert('エラー: ' + e.message) 
     } finally { setIsNewsSubmitting(false) }
   }
@@ -431,6 +470,7 @@ export default function AdminView({ userEmail }: { userEmail: string }) {
 
     setIsScoutSending(true)
     try {
+      // 1. DB保存
       const insertData = scoutForm.targetUserIds.map(uid => ({
         user_id: uid,
         job_id: Number(scoutForm.jobId),
@@ -442,13 +482,58 @@ export default function AdminView({ userEmail }: { userEmail: string }) {
       const { error } = await supabase.from('scouts').insert(insertData)
       if (error) throw error
       
-      alert(`${count}件のスカウトを送信しました！`)
+      // 2. ★通知送信
+      // クエスト名を取得
+      const jobTitle = jobs.find(j => j.id.toString() === scoutForm.jobId)?.title || 'クエスト'
+
+      // 人数分ループして送信（Promise.allで並列処理）
+      await Promise.all(scoutForm.targetUserIds.map(userId => 
+        fetch('/api/admin/push', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            userId: userId,
+            title: 'スカウトが届きました！',
+            body: `特別オファー:「${jobTitle}」への参加依頼が届いています。`,
+            url: '/mypage?tab=quests'
+          })
+        }).catch(e => console.error(`Scout push failed for ${userId}`, e))
+      ))
+      
+      alert(`${count}件のスカウトを送信しました！(通知済み)`)
       setScoutForm({ targetUserIds: [], targetUserNames: [], jobId: '', message: '' })
       setSelectedUserIds(new Set()) 
     } catch (e) {
       if (e instanceof Error) alert('送信エラー: ' + e.message)
     } finally {
       setIsScoutSending(false)
+    }
+  }
+
+  const handleSendPush = async (userId: string, userName: string) => {
+  // 簡易的にpromptでタイトルと本文を入力
+    const title = prompt(`${userName} さんへの通知タイトルを入力してください`, 'しずおかコネクト');
+    if (title === null) return;
+
+    const body = prompt(`${userName} さんへの通知本文を入力してください`, '新着のお知らせがあります');
+    if (body === null) return;
+
+    try {
+      const res = await fetch('/api/admin/push', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ userId, title, body }) // ★内容を送信
+      })
+    
+      const data = await res.json()
+      if (data.success) {
+        alert(`${data.count} 件の端末に送信しました！`)
+      } else {
+        alert('送信失敗: ' + data.message)
+      }
+    } catch (e) {
+      console.error(e)
+      alert('通信エラーが発生しました')
     }
   }
 
@@ -459,6 +544,7 @@ export default function AdminView({ userEmail }: { userEmail: string }) {
     setChatMessages(data || [])
     setTimeout(() => messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' }), 100)
   }
+
   const handleAdminSendMessage = async (e: React.FormEvent) => {
     e.preventDefault()
     if (!chatInput.trim() || !activeChatApplicant) return
@@ -466,8 +552,22 @@ export default function AdminView({ userEmail }: { userEmail: string }) {
     try {
       const { data: { user } } = await supabase.auth.getUser()
       if (!user) throw new Error('Auth error')
-      const { error } = await supabase.from('application_messages').insert({ application_id: activeChatApplicant.id, sender_id: user.id, content: chatInput.trim() })
-      if (error) throw error
+      
+      // ★以前の直接insert処理を削除し、API呼び出しに変更
+      const res = await fetch('/api/chat/send', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          ApplicationId: activeChatApplicant.id,
+          senderId: user.id,
+          content: chatInput.trim(),
+          isFromAdmin: true // 管理者フラグ
+        })
+      })
+
+      if (!res.ok) throw new Error('送信に失敗しました')
+
+      // 画面更新
       const newMsg = { id: Date.now(), content: chatInput.trim(), sender_id: user.id, created_at: new Date().toISOString() }
       setChatMessages(prev => [...prev, newMsg]); setChatInput('')
       setTimeout(() => messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' }), 100)
@@ -477,7 +577,7 @@ export default function AdminView({ userEmail }: { userEmail: string }) {
       alert('送信エラー') 
     } finally { setIsChatSending(false) }
   }
-
+  
   const handleLogout = async () => { await supabase.auth.signOut(); router.push('/login') }
 
   if (loading) return <div className="min-h-screen flex items-center justify-center">Loading...</div>
@@ -780,14 +880,29 @@ export default function AdminView({ userEmail }: { userEmail: string }) {
                                 ) : <span className="text-xs text-gray-300">-</span>}
                              </div>
                           </td>
+
                           <td className="px-6 py-4 text-right">
-                             <button 
-                               onClick={() => openScoutModal([user])}
-                               className="bg-indigo-600 text-white px-3 py-1.5 rounded text-xs font-bold hover:bg-indigo-700 shadow-sm"
-                             >
-                               個別スカウト
+                              {/* ★ flexコンテナを追加してボタンを横並びにする */}
+                              <div className="flex justify-end gap-2">
+      
+                               {/* ★追加する通知ボタン */}
+                              <button 
+                                onClick={() => handleSendPush(user.id, user.username || 'No Name')}
+                                className="bg-orange-500 text-white px-3 py-1.5 rounded text-xs font-bold hover:bg-orange-600 shadow-sm whitespace-nowrap"
+                              >
+                                🔔 通知
+                              </button>
+
+                              {/* 既存のスカウトボタン */}
+                              <button 
+                                onClick={() => openScoutModal([user])}
+                                className="bg-indigo-600 text-white px-3 py-1.5 rounded text-xs font-bold hover:bg-indigo-700 shadow-sm whitespace-nowrap"
+                              >
+                                個別スカウト
                              </button>
-                          </td>
+      
+                           </div>
+                         </td>
                         </tr>
                       ))}
                       {filteredUsers.length === 0 && <tr><td colSpan={5} className="text-center py-8 text-gray-400">条件に合うユーザーがいません</td></tr>}
