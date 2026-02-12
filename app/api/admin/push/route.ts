@@ -1,5 +1,5 @@
 import { NextResponse } from 'next/server'
-import { sendPushNotification } from '../../../utils/push' // 作成した部品を読み込み
+import { sendPushNotification } from '../../../utils/push'
 
 export const runtime = 'edge'
 
@@ -17,8 +17,9 @@ export async function POST(request: Request) {
     const result = await sendPushNotification(userId, title, body || 'お知らせがあります')
 
     return NextResponse.json(result)
-  } catch (err: any) {
+  } catch (err: unknown) {
     console.error("Manual Push API Error:", err)
-    return NextResponse.json({ success: false, error: err.message }, { status: 500 })
+    const errorMessage = err instanceof Error ? err.message : 'Unknown error'
+    return NextResponse.json({ success: false, error: errorMessage }, { status: 500 })
   }
 }

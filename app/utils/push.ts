@@ -20,6 +20,7 @@ function getPkcs8Der(privateKeyBase64: string, publicKeyBase64: string): Uint8Ar
   return der
 }
 
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
 async function signVapidKey(endpoint: string) {
   const privateKey = process.env.VAPID_PRIVATE_KEY!
   const publicKey = process.env.NEXT_PUBLIC_VAPID_PUBLIC_KEY!
@@ -32,6 +33,7 @@ async function signVapidKey(endpoint: string) {
     sub: 'mailto:admin@example.com' 
   }
 
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
   const stringify = (obj: any) => btoa(JSON.stringify(obj)).replace(/=/g, '').replace(/\+/g, '-').replace(/\//g, '_')
   const unsignedToken = `${stringify(header)}.${stringify(claims)}`
 
@@ -62,7 +64,6 @@ async function signVapidKey(endpoint: string) {
 /**
  * 共通通知送信関数
  */
-// ★ url 引数は受け取りますが、DB保存時には無視するように修正
 // eslint-disable-next-line @typescript-eslint/no-unused-vars
 export async function sendPushNotification(userId: string, title: string, body: string, url: string = '/mypage') {
   console.log(`[Push Utils] Sending to ${userId}: ${title}`)
@@ -73,16 +74,14 @@ export async function sendPushNotification(userId: string, title: string, body: 
   )
 
   // 1. 通知ログをDBに保存
-  // ★重要: ここから 'url' を削除しました。これでエラーが解消されます。
   const { error: logError } = await supabase.from('notification_logs').insert({
     user_id: userId,
     title,
     body
-    // url: url  <-- これを削除
+    // url: url (DBにカラムがない場合は削除)
   })
   
   if (logError) {
-    // ログ保存に失敗しても、通知自体は送るように変更（エラーログだけ出す）
     console.error('[Push Utils] Log Error (Non-fatal):', logError)
   }
 
@@ -100,6 +99,7 @@ export async function sendPushNotification(userId: string, title: string, body: 
   // 3. 各デバイスへ送信
   let successCount = 0
   for (const sub of subs) {
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
     const subscription = sub.subscription as any
     try {
       const token = await signVapidKey(subscription.endpoint)

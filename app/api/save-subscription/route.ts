@@ -1,4 +1,3 @@
-// app/api/save-subscription/route.ts
 import { createClient } from '@supabase/supabase-js'
 import { NextResponse } from 'next/server'
 
@@ -56,8 +55,9 @@ export async function POST(request: Request) {
     console.log("Success: Subscription saved to DB")
     return NextResponse.json({ success: true })
 
-  } catch (err: any) {
+  } catch (err: unknown) {
     console.error("Server Error:", err)
-    return NextResponse.json({ success: false, error: err.message }, { status: 500 })
+    const errorMessage = err instanceof Error ? err.message : 'Unknown error'
+    return NextResponse.json({ success: false, error: errorMessage }, { status: 500 })
   }
 }

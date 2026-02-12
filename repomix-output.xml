@@ -43,7 +43,9 @@ The content is organized as follows:
 .gitignore
 app/admin/page.tsx
 app/admin/qr/page.tsx
+app/api/admin/broadcast/route.ts
 app/api/admin/push/route.ts
+app/api/chat/send/route.ts
 app/api/fetch-news/route.ts
 app/api/push/get-message/route.ts
 app/api/save-subscription/route.ts
@@ -77,7 +79,7 @@ postcss.config.mjs
 public/file.svg
 public/globe.svg
 public/logo.png
-public/mainfest.json
+public/manifest.json
 public/next.svg
 public/sw.js
 public/vercel.svg
@@ -88,398 +90,6 @@ tsconfig.json
 
 <files>
 This section contains the contents of the repository's files.
-
-<file path="app/api/admin/push/route.ts">
-// app/api/admin/push/route.ts
-import { createClient } from '@supabase/supabase-js'
-import { NextResponse } from 'next/server'
-
-export const runtime = 'edge'
-
-/**
- * 32バイトの秘密鍵をWeb Crypto APIが理解できる形式(PKCS#8)に変換する
- */
-function getPkcs8Der(privateKeyBase64: string, publicKeyBase64: string): Uint8Array {
-  const rawPrivate = Uint8Array.from(atob(privateKeyBase64.replace(/-/g, '+').replace(/_/g, '/')), c => c.charCodeAt(0))
-  const rawPublic = Uint8Array.from(atob(publicKeyBase64.replace(/-/g, '+').replace(/_/g, '/')), c => c.charCodeAt(0))
-
-  const header = new Uint8Array([
-    0x30, 0x81, 0x87, 0x02, 0x01, 0x00, 0x30, 0x13, 0x06, 0x07, 0x2a, 0x86, 0x48, 0xce, 
-    0x3d, 0x02, 0x01, 0x06, 0x08, 0x2a, 0x86, 0x48, 0xce, 0x3d, 0x03, 0x01, 0x07, 0x04, 
-    0x6d, 0x30, 0x6b, 0x02, 0x01, 0x01, 0x04, 0x20
-  ])
-  const footer = new Uint8Array([0xa1, 0x44, 0x03, 0x42, 0x00])
-
-  const der = new Uint8Array(header.length + rawPrivate.length + footer.length + rawPublic.length)
-  der.set(header)
-  der.set(rawPrivate, header.length)
-  der.set(footer, header.length + rawPrivate.length)
-  der.set(rawPublic, header.length + rawPrivate.length + footer.length)
-  return der
-}
-
-/**
- * VAPID署名(JWT)を作成する
- */
-async function signVapidKey(endpoint: string) {
-  const privateKey = process.env.VAPID_PRIVATE_KEY!
-  const publicKey = process.env.NEXT_PUBLIC_VAPID_PUBLIC_KEY!
-  const aud = new URL(endpoint).origin
-
-  const header = { typ: 'JWT', alg: 'ES256' }
-  const claims = {
-    aud,
-    exp: Math.floor(Date.now() / 1000) + 12 * 3600,
-    sub: 'mailto:admin@example.com' 
-  }
-
-  const stringify = (obj: any) => btoa(JSON.stringify(obj)).replace(/=/g, '').replace(/\+/g, '-').replace(/\//g, '_')
-  const unsignedToken = `${stringify(header)}.${stringify(claims)}`
-
-  const pkcs8 = getPkcs8Der(privateKey, publicKey)
-  const cryptoKey = await crypto.subtle.importKey(
-    'pkcs8',
-    pkcs8,
-    { name: 'ECDSA', namedCurve: 'P-256' },
-    false,
-    ['sign']
-  )
-
-  const signature = await crypto.subtle.sign(
-    { name: 'ECDSA', hash: { name: 'SHA-256' } },
-    cryptoKey,
-    new TextEncoder().encode(unsignedToken)
-  )
-
-  const signatureBase64 = btoa(String.fromCharCode(...new Uint8Array(signature)))
-    .replace(/=/g, '')
-    .replace(/\+/g, '-')
-    .replace(/\//g, '_')
-
-  return `${unsignedToken}.${signatureBase64}`
-}
-
-export async function POST(request: Request) {
-  try {
-    // クライアントから userId に加えて title と body を受け取るように拡張
-    const { userId, title, body } = await request.json()
-    console.log("--- Debug Push API (Pull Mode) ---")
-
-    const supabase = createClient(
-      process.env.NEXT_PUBLIC_SUPABASE_URL!,
-      process.env.SUPABASE_SERVICE_ROLE_KEY!
-    )
-
-    // 1. 通知内容をデータベースに保存 (Service Workerが後で取りに来る)
-    const { error: logError } = await supabase
-      .from('notification_logs')
-      .insert({
-        user_id: userId,
-        title: title || 'しずおかコネクト',
-        body: body || '新着のお知らせがあります'
-      })
-
-    if (logError) {
-      console.error("Failed to log notification:", logError)
-      return NextResponse.json({ success: false, message: '通知ログの保存に失敗しました' }, { status: 500 })
-    }
-    
-    // 2. 宛先の購読情報を取得
-    const { data: subs, error: dbError } = await supabase
-      .from('push_subscriptions')
-      .select('subscription')
-      .eq('user_id', userId)
-
-    if (dbError || !subs || subs.length === 0) {
-      return NextResponse.json({ success: false, message: '通知設定がされていません' })
-    }
-
-    // 3. 空のプッシュ通知（合図）を送信
-    let successCount = 0
-    for (const sub of subs) {
-      const subscription = sub.subscription as any
-      try {
-        const token = await signVapidKey(subscription.endpoint)
-        const res = await fetch(subscription.endpoint, {
-          method: 'POST',
-          headers: {
-            'Authorization': `vapid t=${token}, k=${process.env.NEXT_PUBLIC_VAPID_PUBLIC_KEY}`,
-            'TTL': '60',
-          },
-          body: null // 中身は空で送る
-        })
-
-        if (res.ok) {
-          successCount++
-        } else {
-          console.error('Push failed status:', res.status)
-        }
-      } catch (err) {
-        console.error('Push error for single device:', err)
-      }
-    }
-
-    return NextResponse.json({ success: true, count: successCount })
-  } catch (err: any) {
-    console.error("Server Error:", err)
-    return NextResponse.json({ success: false, error: err.message }, { status: 500 })
-  }
-}
-</file>
-
-<file path="app/api/push/get-message/route.ts">
-import { createClient } from '@supabase/supabase-js'
-import { NextResponse } from 'next/server'
-
-export const runtime = 'edge'
-
-export async function GET(request: Request) {
-  try {
-    const { searchParams } = new URL(request.url)
-    const endpoint = searchParams.get('endpoint')
-
-    // 1. デバッグログ：APIが呼ばれたことを確認
-    console.log("--- Get Message API Called ---")
-    
-    if (!endpoint) {
-      console.error("Error: No endpoint provided in query params")
-      return NextResponse.json({ title: 'エラー', body: '宛先が不明です' }, { status: 400 })
-    }
-
-    const supabase = createClient(
-      process.env.NEXT_PUBLIC_SUPABASE_URL!,
-      process.env.SUPABASE_SERVICE_ROLE_KEY! // 管理者権限で検索
-    )
-
-    // 2. エンドポイントから user_id を特定
-    // JSONB型の中身を検索するため filter を使用します
-    const { data: sub, error: subError } = await supabase
-      .from('push_subscriptions')
-      .select('user_id')
-      .filter('subscription->>endpoint', 'eq', endpoint)
-      .single()
-
-    console.log("Querying for endpoint:", endpoint.substring(0, 40) + "...")
-
-    if (subError || !sub) {
-      console.warn("User not found for this endpoint:", subError?.message)
-      return NextResponse.json({ 
-        title: 'しずおかコネクト', 
-        body: '新着のお知らせがあります' 
-      })
-    }
-
-    console.log("User Identified:", sub.user_id)
-
-    // 3. そのユーザーの最新の通知ログを取得
-    const { data: log, error: logError } = await supabase
-      .from('notification_logs')
-      .select('title, body')
-      .eq('user_id', sub.user_id)
-      .order('created_at', { ascending: false })
-      .limit(1)
-      .single()
-
-    if (logError || !log) {
-      console.log("No specific log found for user, showing default.")
-      return NextResponse.json({ 
-        title: 'しずおかコネクト', 
-        body: '新しい通知があります。アプリを確認してください。' 
-      })
-    }
-
-    // 成功：DBに保存された内容を返す
-    console.log("Success: Returning dynamic content:", log.title)
-    return NextResponse.json({
-      title: log.title,
-      body: log.body
-    })
-
-  } catch (err: unknown) {
-    const message = err instanceof Error ? err.message : 'Unknown error'
-    console.error("Server Error in get-message:", message)
-    return NextResponse.json({ title: '通知', body: 'お知らせがあります' }, { status: 500 })
-  }
-}
-</file>
-
-<file path="app/api/save-subscription/route.ts">
-// app/api/save-subscription/route.ts
-import { createClient } from '@supabase/supabase-js'
-import { NextResponse } from 'next/server'
-
-export const runtime = 'edge'
-
-export async function POST(request: Request) {
-  try {
-    const { subscription } = await request.json()
-    
-    // --- デバッグログ ---
-    console.log("--- Debug Save Subscription ---")
-    
-    // 1. クライアント作成
-    const supabase = createClient(
-      process.env.NEXT_PUBLIC_SUPABASE_URL!,
-      process.env.SUPABASE_SERVICE_ROLE_KEY!,
-    )
-    
-    // 2. ユーザー認証
-    const authHeader = request.headers.get('Authorization')
-    if (!authHeader) {
-        console.error("Error: No Authorization header")
-        return NextResponse.json({ success: false, message: 'No Auth Header' }, { status: 401 })
-    }
-
-    const token = authHeader.replace('Bearer ', '')
-    const { data: { user }, error: authError } = await supabase.auth.getUser(token)
-    
-    if (authError || !user) {
-        console.error("Auth Error:", authError?.message)
-        return NextResponse.json({ success: false, message: 'User Auth Failed' }, { status: 401 })
-    }
-    
-    console.log("User Identified:", user.id)
-
-    // 3. DB保存
-    const { error: insertError } = await supabase
-        .from('push_subscriptions')
-        .insert({
-            user_id: user.id,
-            subscription: subscription
-        })
-    
-    if (insertError) {
-        // すでに登録済み(重複)の場合はエラーにしない
-        if (insertError.message.includes('unique constraint') || insertError.code === '23505') {
-            console.log("Info: Already subscribed (Duplicate skipped)")
-            return NextResponse.json({ success: true, status: 'already_exists' })
-        }
-        
-        console.error("Insert Error (Details):", insertError)
-        return NextResponse.json({ success: false, message: insertError.message }, { status: 500 })
-    }
-
-    console.log("Success: Subscription saved to DB")
-    return NextResponse.json({ success: true })
-
-  } catch (err: any) {
-    console.error("Server Error:", err)
-    return NextResponse.json({ success: false, error: err.message }, { status: 500 })
-  }
-}
-</file>
-
-<file path="app/utils/push.ts">
-import { createClient } from '@supabase/supabase-js'
-
-// 32バイトの秘密鍵をWeb Crypto APIが理解できる形式(PKCS#8)に変換
-function getPkcs8Der(privateKeyBase64: string, publicKeyBase64: string): Uint8Array {
-  const rawPrivate = Uint8Array.from(atob(privateKeyBase64.replace(/-/g, '+').replace(/_/g, '/')), c => c.charCodeAt(0))
-  const rawPublic = Uint8Array.from(atob(publicKeyBase64.replace(/-/g, '+').replace(/_/g, '/')), c => c.charCodeAt(0))
-
-  const header = new Uint8Array([
-    0x30, 0x81, 0x87, 0x02, 0x01, 0x00, 0x30, 0x13, 0x06, 0x07, 0x2a, 0x86, 0x48, 0xce, 
-    0x3d, 0x02, 0x01, 0x06, 0x08, 0x2a, 0x86, 0x48, 0xce, 0x3d, 0x03, 0x01, 0x07, 0x04, 
-    0x6d, 0x30, 0x6b, 0x02, 0x01, 0x01, 0x04, 0x20
-  ])
-  const footer = new Uint8Array([0xa1, 0x44, 0x03, 0x42, 0x00])
-
-  const der = new Uint8Array(header.length + rawPrivate.length + footer.length + rawPublic.length)
-  der.set(header)
-  der.set(rawPrivate, header.length)
-  der.set(footer, header.length + rawPrivate.length)
-  der.set(rawPublic, header.length + rawPrivate.length + footer.length)
-  return der
-}
-
-// VAPID署名作成
-async function signVapidKey(endpoint: string) {
-  const privateKey = process.env.VAPID_PRIVATE_KEY!
-  const publicKey = process.env.NEXT_PUBLIC_VAPID_PUBLIC_KEY!
-  const aud = new URL(endpoint).origin
-
-  const header = { typ: 'JWT', alg: 'ES256' }
-  const claims = {
-    aud,
-    exp: Math.floor(Date.now() / 1000) + 12 * 3600,
-    sub: 'mailto:admin@example.com' 
-  }
-
-  const stringify = (obj: any) => btoa(JSON.stringify(obj)).replace(/=/g, '').replace(/\+/g, '-').replace(/\//g, '_')
-  const unsignedToken = `${stringify(header)}.${stringify(claims)}`
-
-  const pkcs8 = getPkcs8Der(privateKey, publicKey)
-  const cryptoKey = await crypto.subtle.importKey(
-    'pkcs8',
-    pkcs8,
-    { name: 'ECDSA', namedCurve: 'P-256' },
-    false,
-    ['sign']
-  )
-
-  const signature = await crypto.subtle.sign(
-    { name: 'ECDSA', hash: { name: 'SHA-256' } },
-    cryptoKey,
-    new TextEncoder().encode(unsignedToken)
-  )
-
-  const signatureBase64 = btoa(String.fromCharCode(...new Uint8Array(signature)))
-    .replace(/=/g, '')
-    .replace(/\+/g, '-')
-    .replace(/\//g, '_')
-
-  return `${unsignedToken}.${signatureBase64}`
-}
-
-/**
- * 指定したユーザーにプッシュ通知を送る共通関数
- */
-export async function sendPushNotification(userId: string, title: string, body: string, url: string = '/mypage') {
-  console.log(`Sending Push to ${userId}: ${title}`)
-
-  const supabase = createClient(
-    process.env.NEXT_PUBLIC_SUPABASE_URL!,
-    process.env.SUPABASE_SERVICE_ROLE_KEY!
-  )
-
-  // 1. ログ保存
-  await supabase.from('notification_logs').insert({
-    user_id: userId,
-    title,
-    body,
-    url
-  })
-
-  // 2. 購読情報取得
-  const { data: subs } = await supabase
-    .from('push_subscriptions')
-    .select('subscription')
-    .eq('user_id', userId)
-
-  if (!subs || subs.length === 0) return { success: false, count: 0 }
-
-  // 3. 送信
-  let successCount = 0
-  for (const sub of subs) {
-    const subscription = sub.subscription as any
-    try {
-      const token = await signVapidKey(subscription.endpoint)
-      const res = await fetch(subscription.endpoint, {
-        method: 'POST',
-        headers: {
-          'Authorization': `vapid t=${token}, k=${process.env.NEXT_PUBLIC_VAPID_PUBLIC_KEY}`,
-          'TTL': '60',
-        },
-        body: null
-      })
-      if (res.ok) successCount++
-    } catch (e) {
-      console.error('Push Error:', e)
-    }
-  }
-  return { success: true, count: successCount }
-}
-</file>
 
 <file path=".gitignore">
 # See https://help.github.com/articles/ignoring-files/ for more about ignoring files.
@@ -738,6 +348,279 @@ export default function AdminPage() {
 }
 </file>
 
+<file path="app/api/admin/broadcast/route.ts">
+import { createClient } from '@supabase/supabase-js'
+import { NextResponse } from 'next/server'
+import { sendPushNotification } from '../../../utils/push'
+
+export const runtime = 'edge'
+
+export async function POST(request: Request) {
+  try {
+    const { title, body, url } = await request.json()
+    console.log("--- Broadcast Request ---", title)
+
+    const supabase = createClient(
+      process.env.NEXT_PUBLIC_SUPABASE_URL!,
+      process.env.SUPABASE_SERVICE_ROLE_KEY!
+    )
+
+    // 1. 全ユーザーのIDを取得 (重複を排除)
+    const { data: subs, error } = await supabase
+      .from('push_subscriptions')
+      .select('user_id')
+    
+    if (error) throw error
+    if (!subs || subs.length === 0) {
+      return NextResponse.json({ success: true, count: 0, message: 'No subscribers' })
+    }
+
+    // Setを使ってユーザーIDの重複を取り除く
+    const uniqueUserIds = [...new Set(subs.map(s => s.user_id))]
+    console.log(`Broadcasting to ${uniqueUserIds.length} users...`)
+
+    // 2. ループして全員に送信
+    // (人数が多い場合は時間がかかるため、本来はバックグラウンドジョブが望ましいですが、一旦ループで処理)
+    let successCount = 0
+    
+    // 並列処理で高速化
+    const promises = uniqueUserIds.map(userId => 
+      sendPushNotification(userId, title, body, url || '/mypage')
+        .then(res => res.success ? 1 : 0)
+    )
+
+    const results = await Promise.all(promises)
+    successCount = results.reduce((a, b) => a + b, 0)
+
+    console.log(`Broadcast Complete. Success count: ${successCount}`)
+    return NextResponse.json({ success: true, count: successCount })
+
+  } catch (err: any) {
+    console.error("Broadcast Error:", err)
+    return NextResponse.json({ success: false, error: err.message }, { status: 500 })
+  }
+}
+</file>
+
+<file path="app/api/admin/push/route.ts">
+import { NextResponse } from 'next/server'
+import { sendPushNotification } from '../../../utils/push' // 作成した部品を読み込み
+
+export const runtime = 'edge'
+
+export async function POST(request: Request) {
+  try {
+    const { userId, title, body } = await request.json()
+    console.log("--- Manual Push Request ---")
+    console.log(`Target: ${userId}, Title: ${title}`)
+
+    if (!userId || !title) {
+      return NextResponse.json({ success: false, message: 'Missing userId or title' }, { status: 400 })
+    }
+
+    // 部品を使って送信
+    const result = await sendPushNotification(userId, title, body || 'お知らせがあります')
+
+    return NextResponse.json(result)
+  } catch (err: any) {
+    console.error("Manual Push API Error:", err)
+    return NextResponse.json({ success: false, error: err.message }, { status: 500 })
+  }
+}
+</file>
+
+<file path="app/api/chat/send/route.ts">
+import { createClient } from '@supabase/supabase-js'
+import { NextResponse } from 'next/server'
+import { sendPushNotification } from '../../../utils/push'
+
+export const runtime = 'edge'
+
+export async function POST(request: Request) {
+  try {
+    const { ApplicationId, senderId, content, isFromAdmin } = await request.json()
+
+    const supabase = createClient(
+      process.env.NEXT_PUBLIC_SUPABASE_URL!,
+      process.env.SUPABASE_SERVICE_ROLE_KEY!
+    )
+
+    // DB保存
+    const { error: insertError } = await supabase
+      .from('application_messages')
+      .insert({ application_id: ApplicationId, sender_id: senderId, content: content })
+
+    if (insertError) throw insertError
+
+    // 相手を特定して通知
+    if (isFromAdmin) {
+      // 応募情報を取得してユーザーIDを特定
+      const { data: appData } = await supabase
+        .from('job_applications')
+        .select('user_id, job:jobs(title)')
+        .eq('id', ApplicationId)
+        .single()
+      
+      if (appData) {
+        // @ts-ignore
+        const jobTitle = appData.job?.title || 'クエスト'
+        await sendPushNotification(
+          appData.user_id,
+          `新着メッセージ: ${jobTitle}`,
+          `運営から: ${content.substring(0, 30)}...`
+        )
+      }
+    }
+
+    return NextResponse.json({ success: true })
+  } catch (err: any) {
+    return NextResponse.json({ success: false, error: err.message }, { status: 500 })
+  }
+}
+</file>
+
+<file path="app/api/push/get-message/route.ts">
+import { createClient } from '@supabase/supabase-js'
+import { NextResponse } from 'next/server'
+
+export const runtime = 'edge'
+
+export async function GET(request: Request) {
+  try {
+    const { searchParams } = new URL(request.url)
+    const endpoint = searchParams.get('endpoint')
+
+    // 1. デバッグログ：APIが呼ばれたことを確認
+    console.log("--- Get Message API Called ---")
+    
+    if (!endpoint) {
+      console.error("Error: No endpoint provided in query params")
+      return NextResponse.json({ title: 'エラー', body: '宛先が不明です' }, { status: 400 })
+    }
+
+    const supabase = createClient(
+      process.env.NEXT_PUBLIC_SUPABASE_URL!,
+      process.env.SUPABASE_SERVICE_ROLE_KEY! // 管理者権限で検索
+    )
+
+    // 2. エンドポイントから user_id を特定
+    // JSONB型の中身を検索するため filter を使用します
+    const { data: sub, error: subError } = await supabase
+      .from('push_subscriptions')
+      .select('user_id')
+      .filter('subscription->>endpoint', 'eq', endpoint)
+      .single()
+
+    console.log("Querying for endpoint:", endpoint.substring(0, 40) + "...")
+
+    if (subError || !sub) {
+      console.warn("User not found for this endpoint:", subError?.message)
+      return NextResponse.json({ 
+        title: 'しずおかコネクト', 
+        body: '新着のお知らせがあります' 
+      })
+    }
+
+    console.log("User Identified:", sub.user_id)
+
+    // 3. そのユーザーの最新の通知ログを取得
+    const { data: log, error: logError } = await supabase
+      .from('notification_logs')
+      .select('title, body')
+      .eq('user_id', sub.user_id)
+      .order('created_at', { ascending: false })
+      .limit(1)
+      .single()
+
+    if (logError || !log) {
+      console.log("No specific log found for user, showing default.")
+      return NextResponse.json({ 
+        title: 'しずおかコネクト', 
+        body: '新しい通知があります。アプリを確認してください。' 
+      })
+    }
+
+    // 成功：DBに保存された内容を返す
+    console.log("Success: Returning dynamic content:", log.title)
+    return NextResponse.json({
+      title: log.title,
+      body: log.body
+    })
+
+  } catch (err: unknown) {
+    const message = err instanceof Error ? err.message : 'Unknown error'
+    console.error("Server Error in get-message:", message)
+    return NextResponse.json({ title: '通知', body: 'お知らせがあります' }, { status: 500 })
+  }
+}
+</file>
+
+<file path="app/api/save-subscription/route.ts">
+// app/api/save-subscription/route.ts
+import { createClient } from '@supabase/supabase-js'
+import { NextResponse } from 'next/server'
+
+export const runtime = 'edge'
+
+export async function POST(request: Request) {
+  try {
+    const { subscription } = await request.json()
+    
+    // --- デバッグログ ---
+    console.log("--- Debug Save Subscription ---")
+    
+    // 1. クライアント作成
+    const supabase = createClient(
+      process.env.NEXT_PUBLIC_SUPABASE_URL!,
+      process.env.SUPABASE_SERVICE_ROLE_KEY!,
+    )
+    
+    // 2. ユーザー認証
+    const authHeader = request.headers.get('Authorization')
+    if (!authHeader) {
+        console.error("Error: No Authorization header")
+        return NextResponse.json({ success: false, message: 'No Auth Header' }, { status: 401 })
+    }
+
+    const token = authHeader.replace('Bearer ', '')
+    const { data: { user }, error: authError } = await supabase.auth.getUser(token)
+    
+    if (authError || !user) {
+        console.error("Auth Error:", authError?.message)
+        return NextResponse.json({ success: false, message: 'User Auth Failed' }, { status: 401 })
+    }
+    
+    console.log("User Identified:", user.id)
+
+    // 3. DB保存
+    const { error: insertError } = await supabase
+        .from('push_subscriptions')
+        .insert({
+            user_id: user.id,
+            subscription: subscription
+        })
+    
+    if (insertError) {
+        // すでに登録済み(重複)の場合はエラーにしない
+        if (insertError.message.includes('unique constraint') || insertError.code === '23505') {
+            console.log("Info: Already subscribed (Duplicate skipped)")
+            return NextResponse.json({ success: true, status: 'already_exists' })
+        }
+        
+        console.error("Insert Error (Details):", insertError)
+        return NextResponse.json({ success: false, message: insertError.message }, { status: 500 })
+    }
+
+    console.log("Success: Subscription saved to DB")
+    return NextResponse.json({ success: true })
+
+  } catch (err: any) {
+    console.error("Server Error:", err)
+    return NextResponse.json({ success: false, error: err.message }, { status: 500 })
+  }
+}
+</file>
+
 <file path="app/auth/auth-code-error/page.tsx">
 'use client'
 
@@ -847,113 +730,6 @@ export default function AuthErrorPage() {
     <Suspense fallback={<div className="min-h-[100dvh] flex items-center justify-center bg-gray-50">Loading...</div>}>
       <AuthErrorContent />
     </Suspense>
-  )
-}
-</file>
-
-<file path="app/components/NotificationManager.tsx">
-// app/components/NotificationManager.tsx
-'use client'
-
-import { useState, useEffect } from 'react'
-import { urlBase64ToUint8Array } from '../utils/webPush'
-import { supabase } from '../lib/supabaseClient'
-
-export default function NotificationManager() {
-  const [isSupported, setIsSupported] = useState(false)
-  const [isSubscribed, setIsSubscribed] = useState(false)
-  const [loading, setLoading] = useState(false)
-
-  useEffect(() => {
-    if ('serviceWorker' in navigator && 'PushManager' in window) {
-      setIsSupported(true)
-      checkSubscription()
-    }
-  }, [])
-
-  const checkSubscription = async () => {
-    const registration = await navigator.serviceWorker.ready
-    const subscription = await registration.pushManager.getSubscription()
-    if (subscription) {
-      setIsSubscribed(true)
-    }
-  }
-
-  const handleSubscribe = async () => {
-    setLoading(true)
-    try {
-      const registration = await navigator.serviceWorker.ready
-      const vapidKey = process.env.NEXT_PUBLIC_VAPID_PUBLIC_KEY
-      
-      if (!vapidKey) {
-          alert('VAPIDキーが設定されていません')
-          return
-      }
-
-      const subscription = await registration.pushManager.subscribe({
-        userVisibleOnly: true,
-        applicationServerKey: urlBase64ToUint8Array(vapidKey)
-      })
-
-      // API経由でDBに保存
-      const { data: { session } } = await supabase.auth.getSession()
-      
-      await fetch('/api/save-subscription', {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          'Authorization': `Bearer ${session?.access_token}`
-        },
-        body: JSON.stringify({ subscription })
-      })
-
-      setIsSubscribed(true)
-      alert('通知設定をオンにしました！')
-    } catch (error) {
-      console.error('Subscription error:', error)
-      alert('通知の許可に失敗しました。ブラウザの設定を確認してください。')
-    } finally {
-      setLoading(false)
-    }
-  }
-
-  // ★修正1: すでに登録済みなら、このコンポーネント自体を表示しない
-  if (isSubscribed) return null
-
-  // ★修正2: ブラウザが対応していない場合のエラー表示
-  if (!isSupported) {
-    return (
-      <div className="bg-gray-100 p-4 rounded-xl border border-gray-200 mt-4">
-        <p className="text-xs text-red-500 font-bold">
-          ⚠️ この端末またはブラウザは通知に対応していません。
-        </p>
-        <p className="text-[10px] text-gray-500 mt-1">
-          ※iPhoneの場合は iOS 16.4以上 にアップデートし、
-          ホーム画面に追加したアイコンから起動してください。
-        </p>
-      </div>
-    )
-  }
-
-  // ★修正3: ここまで来たら「未登録＆対応端末」なので、登録ボタンを表示
-  return (
-    <div className="bg-white p-4 rounded-xl border border-gray-200 shadow-sm mt-4">
-      <h3 className="font-bold text-gray-800 mb-2 flex items-center gap-2">
-        <span>🔔</span> プッシュ通知
-      </h3>
-      <div>
-        <p className="text-xs text-gray-500 mb-3">
-          重要なクエストやイベント情報を見逃さないように通知を受け取りましょう。
-        </p>
-        <button
-          onClick={handleSubscribe}
-          disabled={loading}
-          className="w-full bg-indigo-600 text-white py-2 rounded-lg font-bold text-sm hover:bg-indigo-700 disabled:opacity-50"
-        >
-          {loading ? '設定中...' : '通知を受け取る'}
-        </button>
-      </div>
-    </div>
   )
 }
 </file>
@@ -1445,6 +1221,136 @@ export default function UpdatePasswordPage() {
 }
 </file>
 
+<file path="app/utils/push.ts">
+import { createClient } from '@supabase/supabase-js'
+
+// --- (前半の署名ロジック等は変更なし) ---
+function getPkcs8Der(privateKeyBase64: string, publicKeyBase64: string): Uint8Array {
+  const rawPrivate = Uint8Array.from(atob(privateKeyBase64.replace(/-/g, '+').replace(/_/g, '/')), c => c.charCodeAt(0))
+  const rawPublic = Uint8Array.from(atob(publicKeyBase64.replace(/-/g, '+').replace(/_/g, '/')), c => c.charCodeAt(0))
+
+  const header = new Uint8Array([
+    0x30, 0x81, 0x87, 0x02, 0x01, 0x00, 0x30, 0x13, 0x06, 0x07, 0x2a, 0x86, 0x48, 0xce, 
+    0x3d, 0x02, 0x01, 0x06, 0x08, 0x2a, 0x86, 0x48, 0xce, 0x3d, 0x03, 0x01, 0x07, 0x04, 
+    0x6d, 0x30, 0x6b, 0x02, 0x01, 0x01, 0x04, 0x20
+  ])
+  const footer = new Uint8Array([0xa1, 0x44, 0x03, 0x42, 0x00])
+
+  const der = new Uint8Array(header.length + rawPrivate.length + footer.length + rawPublic.length)
+  der.set(header)
+  der.set(rawPrivate, header.length)
+  der.set(footer, header.length + rawPrivate.length)
+  der.set(rawPublic, header.length + rawPrivate.length + footer.length)
+  return der
+}
+
+async function signVapidKey(endpoint: string) {
+  const privateKey = process.env.VAPID_PRIVATE_KEY!
+  const publicKey = process.env.NEXT_PUBLIC_VAPID_PUBLIC_KEY!
+  const aud = new URL(endpoint).origin
+
+  const header = { typ: 'JWT', alg: 'ES256' }
+  const claims = {
+    aud,
+    exp: Math.floor(Date.now() / 1000) + 12 * 3600,
+    sub: 'mailto:admin@example.com' 
+  }
+
+  const stringify = (obj: any) => btoa(JSON.stringify(obj)).replace(/=/g, '').replace(/\+/g, '-').replace(/\//g, '_')
+  const unsignedToken = `${stringify(header)}.${stringify(claims)}`
+
+  const pkcs8 = getPkcs8Der(privateKey, publicKey)
+  const cryptoKey = await crypto.subtle.importKey(
+    'pkcs8',
+    pkcs8,
+    { name: 'ECDSA', namedCurve: 'P-256' },
+    false,
+    ['sign']
+  )
+
+  const signature = await crypto.subtle.sign(
+    { name: 'ECDSA', hash: { name: 'SHA-256' } },
+    cryptoKey,
+    new TextEncoder().encode(unsignedToken)
+  )
+
+  const signatureBase64 = btoa(String.fromCharCode(...new Uint8Array(signature)))
+    .replace(/=/g, '')
+    .replace(/\+/g, '-')
+    .replace(/\//g, '_')
+
+  return `${unsignedToken}.${signatureBase64}`
+}
+// --- (ここまで変更なし) ---
+
+/**
+ * 共通通知送信関数
+ */
+// ★ url 引数は受け取りますが、DB保存時には無視するように修正
+// eslint-disable-next-line @typescript-eslint/no-unused-vars
+export async function sendPushNotification(userId: string, title: string, body: string, url: string = '/mypage') {
+  console.log(`[Push Utils] Sending to ${userId}: ${title}`)
+
+  const supabase = createClient(
+    process.env.NEXT_PUBLIC_SUPABASE_URL!,
+    process.env.SUPABASE_SERVICE_ROLE_KEY!
+  )
+
+  // 1. 通知ログをDBに保存
+  // ★重要: ここから 'url' を削除しました。これでエラーが解消されます。
+  const { error: logError } = await supabase.from('notification_logs').insert({
+    user_id: userId,
+    title,
+    body
+    // url: url  <-- これを削除
+  })
+  
+  if (logError) {
+    // ログ保存に失敗しても、通知自体は送るように変更（エラーログだけ出す）
+    console.error('[Push Utils] Log Error (Non-fatal):', logError)
+  }
+
+  // 2. ユーザーの購読情報(エンドポイント)を取得
+  const { data: subs, error: subError } = await supabase
+    .from('push_subscriptions')
+    .select('subscription')
+    .eq('user_id', userId)
+
+  if (subError || !subs || subs.length === 0) {
+    console.warn('[Push Utils] No subscription found for user:', userId)
+    return { success: false, count: 0, message: 'No subscription' }
+  }
+
+  // 3. 各デバイスへ送信
+  let successCount = 0
+  for (const sub of subs) {
+    const subscription = sub.subscription as any
+    try {
+      const token = await signVapidKey(subscription.endpoint)
+      const res = await fetch(subscription.endpoint, {
+        method: 'POST',
+        headers: {
+          'Authorization': `vapid t=${token}, k=${process.env.NEXT_PUBLIC_VAPID_PUBLIC_KEY}`,
+          'TTL': '60',
+        },
+        body: null
+      })
+
+      if (res.ok) {
+        successCount++
+      } else {
+        console.error(`[Push Utils] Failed: ${res.status}`)
+      }
+    } catch (e) {
+      console.error('[Push Utils] Network Error:', e)
+    }
+  }
+  
+  console.log(`[Push Utils] Sent successfully to ${successCount} devices`)
+  return { success: true, count: successCount }
+}
+</file>
+
 <file path="app/utils/webPush.ts">
 // app/utils/webPush.ts
 
@@ -1513,7 +1419,7 @@ export default config;
 <svg fill="none" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 16 16"><g clip-path="url(#a)"><path fill-rule="evenodd" clip-rule="evenodd" d="M10.27 14.1a6.5 6.5 0 0 0 3.67-3.45q-1.24.21-2.7.34-.31 1.83-.97 3.1M8 16A8 8 0 1 0 8 0a8 8 0 0 0 0 16m.48-1.52a7 7 0 0 1-.96 0H7.5a4 4 0 0 1-.84-1.32q-.38-.89-.63-2.08a40 40 0 0 0 3.92 0q-.25 1.2-.63 2.08a4 4 0 0 1-.84 1.31zm2.94-4.76q1.66-.15 2.95-.43a7 7 0 0 0 0-2.58q-1.3-.27-2.95-.43a18 18 0 0 1 0 3.44m-1.27-3.54a17 17 0 0 1 0 3.64 39 39 0 0 1-4.3 0 17 17 0 0 1 0-3.64 39 39 0 0 1 4.3 0m1.1-1.17q1.45.13 2.69.34a6.5 6.5 0 0 0-3.67-3.44q.65 1.26.98 3.1M8.48 1.5l.01.02q.41.37.84 1.31.38.89.63 2.08a40 40 0 0 0-3.92 0q.25-1.2.63-2.08a4 4 0 0 1 .85-1.32 7 7 0 0 1 .96 0m-2.75.4a6.5 6.5 0 0 0-3.67 3.44 29 29 0 0 1 2.7-.34q.31-1.83.97-3.1M4.58 6.28q-1.66.16-2.95.43a7 7 0 0 0 0 2.58q1.3.27 2.95.43a18 18 0 0 1 0-3.44m.17 4.71q-1.45-.12-2.69-.34a6.5 6.5 0 0 0 3.67 3.44q-.65-1.27-.98-3.1" fill="#666"/></g><defs><clipPath id="a"><path fill="#fff" d="M0 0h16v16H0z"/></clipPath></defs></svg>
 </file>
 
-<file path="public/mainfest.json">
+<file path="public/manifest.json">
 {
   "name": "しずおかコネクト",
   "short_name": "しずコネ",
@@ -1539,40 +1445,6 @@ export default config;
 
 <file path="public/next.svg">
 <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 394 80"><path fill="#000" d="M262 0h68.5v12.7h-27.2v66.6h-13.6V12.7H262V0ZM149 0v12.7H94v20.4h44.3v12.6H94v21h55v12.6H80.5V0h68.7zm34.3 0h-17.8l63.8 79.4h17.9l-32-39.7 32-39.6h-17.9l-23 28.6-23-28.6zm18.3 56.7-9-11-27.1 33.7h17.8l18.3-22.7z"/><path fill="#000" d="M81 79.3 17 0H0v79.3h13.6V17l50.2 62.3H81Zm252.6-.4c-1 0-1.8-.4-2.5-1s-1.1-1.6-1.1-2.6.3-1.8 1-2.5 1.6-1 2.6-1 1.8.3 2.5 1a3.4 3.4 0 0 1 .6 4.3 3.7 3.7 0 0 1-3 1.8zm23.2-33.5h6v23.3c0 2.1-.4 4-1.3 5.5a9.1 9.1 0 0 1-3.8 3.5c-1.6.8-3.5 1.3-5.7 1.3-2 0-3.7-.4-5.3-1s-2.8-1.8-3.7-3.2c-.9-1.3-1.4-3-1.4-5h6c.1.8.3 1.6.7 2.2s1 1.2 1.6 1.5c.7.4 1.5.5 2.4.5 1 0 1.8-.2 2.4-.6a4 4 0 0 0 1.6-1.8c.3-.8.5-1.8.5-3V45.5zm30.9 9.1a4.4 4.4 0 0 0-2-3.3 7.5 7.5 0 0 0-4.3-1.1c-1.3 0-2.4.2-3.3.5-.9.4-1.6 1-2 1.6a3.5 3.5 0 0 0-.3 4c.3.5.7.9 1.3 1.2l1.8 1 2 .5 3.2.8c1.3.3 2.5.7 3.7 1.2a13 13 0 0 1 3.2 1.8 8.1 8.1 0 0 1 3 6.5c0 2-.5 3.7-1.5 5.1a10 10 0 0 1-4.4 3.5c-1.8.8-4.1 1.2-6.8 1.2-2.6 0-4.9-.4-6.8-1.2-2-.8-3.4-2-4.5-3.5a10 10 0 0 1-1.7-5.6h6a5 5 0 0 0 3.5 4.6c1 .4 2.2.6 3.4.6 1.3 0 2.5-.2 3.5-.6 1-.4 1.8-1 2.4-1.7a4 4 0 0 0 .8-2.4c0-.9-.2-1.6-.7-2.2a11 11 0 0 0-2.1-1.4l-3.2-1-3.8-1c-2.8-.7-5-1.7-6.6-3.2a7.2 7.2 0 0 1-2.4-5.7 8 8 0 0 1 1.7-5 10 10 0 0 1 4.3-3.5c2-.8 4-1.2 6.4-1.2 2.3 0 4.4.4 6.2 1.2 1.8.8 3.2 2 4.3 3.4 1 1.4 1.5 3 1.5 5h-5.8z"/></svg>
-</file>
-
-<file path="public/sw.js">
-// public/sw.js
-// Version 1.0.1
-
-self.addEventListener('push', function (event) {
-
-  console.log('Push received!'); // スマホをPCに繋いでいればログで見えます
-  
-  const promise = self.registration.pushManager.getSubscription()
-    .then(subscription => {
-      if (!subscription) throw new Error('No subscription found');
-      
-      const endpoint = encodeURIComponent(subscription.endpoint);
-      // ★絶対パスで指定することを確認
-      return fetch(`/api/push/get-message?endpoint=${endpoint}`);
-    })
-  // ...（以下、
-    .then(res => res.json())
-    .then(data => {
-      // 3. APIから届いたタイトルと本文を表示
-      return self.registration.showNotification(data.title || 'しずおかコネクト', {
-        body: data.body || '新着のお知らせがあります', // データがない時の予備
-        icon: '/logo.png',
-        badge: '/logo.png',
-      });
-    })
-    .catch(err => {
-      console.error('Push fetch error:', err);
-    });
-
-  event.waitUntil(promise);
-});
 </file>
 
 <file path="public/vercel.svg">
@@ -1622,960 +1494,107 @@ The easiest way to deploy your Next.js app is to use the [Vercel Platform](https
 Check out our [Next.js deployment documentation](https://nextjs.org/docs/app/building-your-application/deploying) for more details.
 </file>
 
-<file path="app/components/mypage/AdminView.tsx">
+<file path="app/components/NotificationManager.tsx">
+// app/components/NotificationManager.tsx
 'use client'
 
-import { useEffect, useState, useRef } from 'react'
-import { supabase } from '@/app/lib/supabaseClient'
-import { eventSupabase } from '@/app/lib/eventDbClient'
-import { useRouter } from 'next/navigation'
-import { QRCodeSVG } from 'qrcode.react'
+import { useState, useEffect } from 'react'
+import { urlBase64ToUint8Array } from '../utils/webPush'
+import { supabase } from '../lib/supabaseClient'
 
-// --- 定数 & 型定義 ---
-const ADMIN_EMAILS = [
-  'admin@test.com',
-  'campustocommunityshizuoka@gmail.com'
-]
-
-type ExternalEvent = {
-  id: number
-  title: string
-  event_date: string
-  poster_id?: string
-}
-
-type NewsSource = {
-  id: number
-  name: string
-  rss_url: string
-  fallback_url: string | null
-  is_active: boolean
-}
-
-type Job = {
-  id: number
-  title: string
-  description: string
-  reward_amount: string
-  required_rank: string
-  required_badges: number[] | null
-  deadline: string | null
-  created_at: string
-}
-
-type Badge = {
-  id: number
-  name: string
-  icon_url: string
-}
-
-type UserProfile = {
-  id: string
-  email: string
-  username: string | null
-  current_rank: string
-  total_xp: number
-  user_badges: {
-    badge: Badge | null
-  }[]
-}
-
-type Applicant = {
-  id: number
-  user_id: string
-  status: 'pending' | 'approved' | 'rejected'
-  message: string
-  created_at: string
-  user: {
-    email: string
-    current_rank: string
-    total_xp: number
-  }
-}
-
-type NewsFeed = {
-  id: number
-  title: string
-  link_url: string | null
-  content: string | null
-  source_name: string | null
-  published_at: string
-  image_url: string | null
-}
-
-type NewsFormState = {
-  title: string
-  link_url: string
-  content: string
-  source_name: string
-  image_url: string
-}
-
-type ScoutFormState = {
-  targetUserIds: string[]
-  targetUserNames: string[]
-  jobId: string
-  message: string
-}
-
-type ChatMessage = {
-  id: number
-  content: string
-  sender_id: string
-  created_at: string
-}
-
-export default function AdminView({ userEmail }: { userEmail: string }) {
-  const router = useRouter()
-  const [loading, setLoading] = useState(true)
-  
-  type ViewState = 'job_list' | 'job_detail' | 'create_job' | 'qr' | 'news_list' | 'edit_news' | 'user_search'
-  const [activeView, setActiveView] = useState<ViewState>('job_list')
-
-  const [allBadges, setAllBadges] = useState<Badge[]>([])
-
-  const [events, setEvents] = useState<ExternalEvent[]>([])
-  const [selectedEventId, setSelectedEventId] = useState<number | null>(null)
-  const [qrValue, setQrValue] = useState('')
-  const [isQrProcessing, setIsQrProcessing] = useState(false)
-
-  const [jobs, setJobs] = useState<Job[]>([])
-  const [selectedJobId, setSelectedJobId] = useState<number | null>(null)
-  const [selectedJob, setSelectedJob] = useState<Job | null>(null)
-  const [applicants, setApplicants] = useState<Applicant[]>([])
-
-  const [newJob, setNewJob] = useState({
-    title: '', description: '', reward_val: '', required_rank: 'ビギナー', deadline: ''
-  })
-  const [newJobBadges, setNewJobBadges] = useState<number[]>([]) 
-  const [isJobSubmitting, setIsJobSubmitting] = useState(false)
-
-  const [newsList, setNewsList] = useState<NewsFeed[]>([])
-  const [editingNewsId, setEditingNewsId] = useState<number | null>(null)
-  const [newsForm, setNewsForm] = useState<NewsFormState>({
-    title: '', link_url: '', content: '', source_name: '公式お知らせ', image_url: ''
-  })
-  const [isNewsSubmitting, setIsNewsSubmitting] = useState(false)
-  const [isSyncingNews, setIsSyncingNews] = useState(false)
-
-  const [sources, setSources] = useState<NewsSource[]>([])
-  const [newSource, setNewSource] = useState({ name: '', rss_url: '', fallback_url: '' })
-
-  const [users, setUsers] = useState<UserProfile[]>([])
-  const [filterRank, setFilterRank] = useState<string>('all')
-  const [filterBadge, setFilterBadge] = useState<number | 'all'>('all')
-  const [selectedUserIds, setSelectedUserIds] = useState<Set<string>>(new Set())
-
-  const [scoutForm, setScoutForm] = useState<ScoutFormState>({
-    targetUserIds: [], targetUserNames: [], jobId: '', message: ''
-  })
-  const [isScoutSending, setIsScoutSending] = useState(false)
-
-  const [activeChatApplicant, setActiveChatApplicant] = useState<Applicant | null>(null)
-  const [chatMessages, setChatMessages] = useState<ChatMessage[]>([])
-  const [chatInput, setChatInput] = useState('')
-  const [isChatSending, setIsChatSending] = useState(false)
-  const messagesEndRef = useRef<HTMLDivElement>(null)
+export default function NotificationManager() {
+  const [isSupported, setIsSupported] = useState(false)
+  const [isSubscribed, setIsSubscribed] = useState(false)
+  const [loading, setLoading] = useState(false)
 
   useEffect(() => {
-    if (!ADMIN_EMAILS.includes(userEmail)) {
-      alert('権限がありません')
-      router.push('/')
-      return
+    if ('serviceWorker' in navigator && 'PushManager' in window) {
+      setIsSupported(true)
+      checkSubscription()
     }
-    const init = async () => {
-      const { data: eventData } = await eventSupabase
-        .from('events')
-        .select('id, title, event_date')
-        .order('event_date', { ascending: false })
-        .returns<ExternalEvent[]>()
-      setEvents(eventData || [])
+  }, [])
 
-      const { data: badgeData } = await supabase.from('badges').select('*').returns<Badge[]>()
-      setAllBadges(badgeData || [])
+  const checkSubscription = async () => {
+    const registration = await navigator.serviceWorker.ready
+    const subscription = await registration.pushManager.getSubscription()
+    if (subscription) {
+      setIsSubscribed(true)
+    }
+  }
+
+  const handleSubscribe = async () => {
+    setLoading(true)
+    try {
+      const registration = await navigator.serviceWorker.ready
+      const vapidKey = process.env.NEXT_PUBLIC_VAPID_PUBLIC_KEY
       
-      void fetchJobs()
-      void fetchNews()
-      void fetchSources()
-      void fetchUsers()
-      setLoading(false)
-    }
-    void init()
-  }, [userEmail, router])
-
-  const fetchJobs = async () => {
-    const { data } = await supabase.from('jobs').select('*').order('created_at', { ascending: false }).returns<Job[]>()
-    setJobs(data || [])
-  }
-
-  const fetchNews = async () => {
-    const { data } = await supabase.from('news_feeds').select('*').order('published_at', { ascending: false }).returns<NewsFeed[]>()
-    setNewsList(data || [])
-  }
-
-  const fetchSources = async () => {
-    const { data } = await supabase.from('news_sources').select('*').order('id').returns<NewsSource[]>()
-    setSources(data || [])
-  }
-
-  const fetchUsers = async () => {
-    const { data } = await supabase
-      .from('profiles')
-      .select(`
-        id, email, username, current_rank, total_xp,
-        user_badges (
-          badge:badges ( id, name, icon_url )
-        )
-      `)
-      .order('total_xp', { ascending: false })
-      .returns<UserProfile[]>()
-
-    setUsers(data || [])
-  }
-
-  const handleJobClick = async (job: Job) => {
-    setSelectedJobId(job.id)
-    setSelectedJob(job)
-    setActiveView('job_detail')
-    
-    const { data: appData } = await supabase
-      .from('job_applications')
-      .select(`id, user_id, status, message, created_at, user:profiles ( email, current_rank, total_xp )`)
-      .eq('job_id', job.id)
-      .order('created_at', { ascending: false })
-
-    type AppResponse = {
-        id: number; user_id: string; status: string; message: string; created_at: string;
-        user: { email: string; current_rank: string; total_xp: number } | null
-    }
-    
-    const formattedApplicants: Applicant[] = ((appData as unknown) as AppResponse[] || []).map((app) => ({
-      id: app.id,
-      user_id: app.user_id,
-      status: (app.status as 'pending' | 'approved' | 'rejected'),
-      message: app.message,
-      created_at: app.created_at,
-      user: {
-        email: app.user?.email || 'Unknown',
-        current_rank: app.user?.current_rank || 'ビギナー',
-        total_xp: app.user?.total_xp || 0
+      if (!vapidKey) {
+          alert('VAPIDキーが設定されていません')
+          return
       }
-    }))
-    setApplicants(formattedApplicants)
-  }
 
-  const handleDeleteJob = async () => {
-    if (!selectedJobId) return
-    if (!confirm('本当にこのクエストを削除しますか？\n応募データも全て削除されます。')) return
-
-    const { error } = await supabase.from('jobs').delete().eq('id', selectedJobId)
-    if (error) alert('削除失敗: ' + error.message)
-    else { alert('削除しました'); void fetchJobs(); setActiveView('job_list') }
-  }
-
-  const updateStatus = async (appId: number, newStatus: 'approved' | 'rejected') => {
-    if (!confirm(`${newStatus === 'approved' ? '採用' : '不採用'}にしますか？`)) return
-    const { error } = await supabase.from('job_applications').update({ status: newStatus }).eq('id', appId)
-    if (!error) {
-        setApplicants(prev => prev.map(a => a.id === appId ? { ...a, status: newStatus } : a))
-    }
-    else alert('更新失敗')
-  }
-
-  const handleCreateJob = async (e: React.FormEvent) => {
-    e.preventDefault()
-    if (!confirm('公開しますか？')) return
-    setIsJobSubmitting(true)
-    try {
-      const { data: { user } } = await supabase.auth.getUser()
-      
-      const rewardFormatted = newJob.reward_val ? `${Number(newJob.reward_val).toLocaleString()}円` : '応相談'
-
-      const { error } = await supabase.from('jobs').insert({
-        title: newJob.title,
-        description: newJob.description,
-        reward_amount: rewardFormatted,
-        required_rank: newJob.required_rank,
-        required_badges: newJobBadges.length > 0 ? newJobBadges : null,
-        deadline: newJob.deadline || null,
-        owner_id: user?.id,
-        is_active: true
+      const subscription = await registration.pushManager.subscribe({
+        userVisibleOnly: true,
+        applicationServerKey: urlBase64ToUint8Array(vapidKey)
       })
-      if (error) throw error
-      alert('作成しました！')
-      
-      setNewJob({ title: '', description: '', reward_val: '', required_rank: 'ビギナー', deadline: '' })
-      setNewJobBadges([])
-      
-      void fetchJobs()
-      setActiveView('job_list')
-    } catch (e) {
-      if (e instanceof Error) alert('作成エラー: ' + e.message)
-    } finally {
-      setIsJobSubmitting(false)
-    }
-  }
 
-  const toggleJobBadge = (badgeId: number) => {
-    setNewJobBadges(prev => 
-      prev.includes(badgeId) ? prev.filter(id => id !== badgeId) : [...prev, badgeId]
-    )
-  }
-
-  const handleEventSelect = async (e: React.ChangeEvent<HTMLSelectElement>) => {
-    const eid = Number(e.target.value)
-    setSelectedEventId(eid || null)
-    setQrValue('')
-    if (eid) {
-      const { data } = await supabase.from('event_secrets').select('secret_code').eq('event_id', eid).single()
-      if (data) setQrValue(data.secret_code)
-    }
-  }
-  const generateNewQr = async () => {
-    if (!selectedEventId || !confirm('新しいQRを発行しますか？')) return
-    setIsQrProcessing(true)
-    try {
-      const secret = `evt-${selectedEventId}-${Math.random().toString(36).substring(2, 10)}`
-      await supabase.from('event_secrets').delete().eq('event_id', selectedEventId)
-      await supabase.from('event_secrets').insert({ event_id: selectedEventId, secret_code: secret })
-      setQrValue(secret)
-    } catch { alert('エラー') } finally { setIsQrProcessing(false) }
-  }
-
-  const handlePrintQr = () => {
-    window.print()
-  }
-
-  const handleSyncNews = async () => {
-    setIsSyncingNews(true)
-    try {
+      // API経由でDBに保存
       const { data: { session } } = await supabase.auth.getSession()
-      const token = session?.access_token
-
-      const res = await fetch('/api/fetch-news', { 
+      
+      await fetch('/api/save-subscription', {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
-          'X-Supabase-Auth': token || '' 
-        }
+          'Authorization': `Bearer ${session?.access_token}`
+        },
+        body: JSON.stringify({ subscription })
       })
-      
-      const data = await res.json()
-      if (data.success) {
-        alert(data.message)
-        void fetchNews()
-      } else {
-        alert('同期エラー: ' + (data.message || '詳細不明'))
-      }
-    } catch (e) {
-      // eslint-disable-next-line @typescript-eslint/no-unused-vars
-      const _ = e
-      alert('通信エラーが発生しました')
+
+      setIsSubscribed(true)
+      alert('通知設定をオンにしました！')
+    } catch (error) {
+      console.error('Subscription error:', error)
+      alert('通知の許可に失敗しました。ブラウザの設定を確認してください。')
     } finally {
-      setIsSyncingNews(false)
+      setLoading(false)
     }
   }
 
-  const handleAddSource = async () => {
-    if (!newSource.name || !newSource.rss_url) return alert('名称とRSS URLは必須です')
-    const { error } = await supabase.from('news_sources').insert({ name: newSource.name, rss_url: newSource.rss_url, fallback_url: newSource.fallback_url || null })
-    if (error) alert('エラー: ' + error.message)
-    else { setNewSource({ name: '', rss_url: '', fallback_url: '' }); fetchSources() }
-  }
-  const handleDeleteSource = async (id: number) => {
-    if (!confirm('監視を解除しますか？')) return
-    const { error } = await supabase.from('news_sources').delete().eq('id', id)
-    if(error) alert('エラー: ' + error.message); else fetchSources()
-  }
-  const openCreateNews = () => { setEditingNewsId(null); setNewsForm({ title: '', link_url: '', content: '', source_name: '公式お知らせ', image_url: '' }); setActiveView('edit_news') }
-  const openEditNews = (news: NewsFeed) => { setEditingNewsId(news.id); setNewsForm({ title: news.title, link_url: news.link_url || '', content: news.content || '', source_name: news.source_name || '', image_url: news.image_url || '' }); setActiveView('edit_news') }
-  const handleDeleteNews = async (id: number) => {
-    if (!confirm('本当に削除しますか？')) return
-    const { error } = await supabase.from('news_feeds').delete().eq('id', id)
-    if (error) alert('削除失敗: ' + error.message); else void fetchNews()
-  }
-  const handleSaveNews = async (e: React.FormEvent) => {
-    e.preventDefault()
-    setIsNewsSubmitting(true)
-    const saveData = { title: newsForm.title, link_url: newsForm.link_url || null, content: newsForm.content || null, source_name: newsForm.source_name || 'お知らせ', image_url: newsForm.image_url || null, published_at: undefined as string | undefined }
-    try {
-      if (editingNewsId) {
-        const { error } = await supabase.from('news_feeds').update(saveData).eq('id', editingNewsId)
-        if (error) throw error; alert('更新しました')
-      } else {
-        saveData.published_at = new Date().toISOString()
-        const { error } = await supabase.from('news_feeds').insert(saveData)
-        if (error) throw error; alert('作成しました')
-      }
-      void fetchNews(); setActiveView('news_list')
-    } catch (e: unknown) { 
-      if (e instanceof Error) alert('エラー: ' + e.message) 
-    } finally { setIsNewsSubmitting(false) }
-  }
+  // ★修正1: すでに登録済みなら、このコンポーネント自体を表示しない
+  if (isSubscribed) return null
 
-  const toggleUserSelection = (userId: string) => {
-    const newSet = new Set(selectedUserIds)
-    if (newSet.has(userId)) newSet.delete(userId)
-    else newSet.add(userId)
-    setSelectedUserIds(newSet)
-  }
-
-  const selectAllFilteredUsers = () => {
-    const newSet = new Set(selectedUserIds)
-    filteredUsers.forEach(u => newSet.add(u.id))
-    setSelectedUserIds(newSet)
-  }
-
-  const clearSelection = () => setSelectedUserIds(new Set())
-
-  const filteredUsers = users.filter(user => {
-    const rankMatch = filterRank === 'all' || user.current_rank === filterRank
-    const badgeMatch = filterBadge === 'all' || user.user_badges.some(ub => ub.badge?.id === filterBadge)
-    return rankMatch && badgeMatch
-  })
-
-  const openScoutModal = (targets: UserProfile[]) => {
-    if (jobs.length === 0) {
-      alert('スカウトを送るには、先に「求人作成」でクエストを作成してください。')
-      return
-    }
-    
-    setScoutForm({
-      targetUserIds: targets.map(u => u.id),
-      targetUserNames: targets.map(u => u.username || u.email),
-      jobId: jobs[0].id.toString(),
-      message: 'あなたのプロフィールを拝見し、ぜひこのプロジェクトに参加していただきたいと思いました。'
-    })
-  }
-
-  const handleSendScout = async (e: React.FormEvent) => {
-    e.preventDefault()
-    if (scoutForm.targetUserIds.length === 0) return
-    const count = scoutForm.targetUserIds.length
-    if (!confirm(`${count}名にスカウトを一斉送信しますか？`)) return
-
-    setIsScoutSending(true)
-    try {
-      const insertData = scoutForm.targetUserIds.map(uid => ({
-        user_id: uid,
-        job_id: Number(scoutForm.jobId),
-        message: scoutForm.message,
-        status: 'offered',
-        is_read: false
-      }))
-
-      const { error } = await supabase.from('scouts').insert(insertData)
-      if (error) throw error
-      
-      alert(`${count}件のスカウトを送信しました！`)
-      setScoutForm({ targetUserIds: [], targetUserNames: [], jobId: '', message: '' })
-      setSelectedUserIds(new Set()) 
-    } catch (e) {
-      if (e instanceof Error) alert('送信エラー: ' + e.message)
-    } finally {
-      setIsScoutSending(false)
-    }
-  }
-  const handleSendPush = async (userId: string, userName: string) => {
-  // 簡易的にpromptでタイトルと本文を入力
-    const title = prompt(`${userName} さんへの通知タイトルを入力してください`, 'しずおかコネクト');
-    if (title === null) return;
-
-    const body = prompt(`${userName} さんへの通知本文を入力してください`, '新着のお知らせがあります');
-    if (body === null) return;
-
-    try {
-      const res = await fetch('/api/admin/push', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ userId, title, body }) // ★内容を送信
-      })
-    
-      const data = await res.json()
-      if (data.success) {
-        alert(`${data.count} 件の端末に送信しました！`)
-      } else {
-        alert('送信失敗: ' + data.message)
-      }
-    } catch (e) {
-      console.error(e)
-      alert('通信エラーが発生しました')
-    }
-  }
-
-  const openChat = async (app: Applicant) => {
-    setActiveChatApplicant(app)
-    setChatMessages([])
-    const { data } = await supabase.from('application_messages').select('*').eq('application_id', app.id).order('created_at', { ascending: true }).returns<ChatMessage[]>()
-    setChatMessages(data || [])
-    setTimeout(() => messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' }), 100)
-  }
-  const handleAdminSendMessage = async (e: React.FormEvent) => {
-    e.preventDefault()
-    if (!chatInput.trim() || !activeChatApplicant) return
-    setIsChatSending(true)
-    try {
-      const { data: { user } } = await supabase.auth.getUser()
-      if (!user) throw new Error('Auth error')
-      const { error } = await supabase.from('application_messages').insert({ application_id: activeChatApplicant.id, sender_id: user.id, content: chatInput.trim() })
-      if (error) throw error
-      const newMsg = { id: Date.now(), content: chatInput.trim(), sender_id: user.id, created_at: new Date().toISOString() }
-      setChatMessages(prev => [...prev, newMsg]); setChatInput('')
-      setTimeout(() => messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' }), 100)
-    } catch(e) { 
-      // eslint-disable-next-line @typescript-eslint/no-unused-vars
-      const _ = e
-      alert('送信エラー') 
-    } finally { setIsChatSending(false) }
-  }
-
-  const handleLogout = async () => { await supabase.auth.signOut(); router.push('/login') }
-
-  if (loading) return <div className="min-h-screen flex items-center justify-center">Loading...</div>
-
-  return (
-    <div className="min-h-screen bg-slate-50 font-sans text-gray-900 flex flex-col">
-      <div className="print:hidden">
-        <header className="bg-slate-800 text-white shadow-md sticky top-0 z-30 px-4 sm:px-6 py-4 flex justify-between items-center">
-          <div className="flex items-center gap-2"><span className="text-xl">🛡️</span><h1 className="text-lg font-bold">管理者コンソール</h1></div>
-          <button onClick={handleLogout} className="text-xs bg-slate-700 hover:bg-slate-600 px-3 py-2 rounded">ログアウト</button>
-        </header>
-
-        <div className="flex flex-col md:flex-row flex-1 max-w-6xl mx-auto w-full p-4 gap-6 items-start">
-          <nav className="w-full md:w-64 bg-white rounded-xl shadow-sm border border-gray-200 overflow-x-auto md:overflow-visible flex md:flex-col shrink-0 sticky top-20 z-20">
-            <button onClick={() => setActiveView('job_list')} className={`text-left px-6 py-4 font-bold text-sm flex gap-3 whitespace-nowrap ${['job_list', 'job_detail'].includes(activeView) ? 'bg-blue-50 text-blue-600 md:border-l-4 md:border-b-0 border-b-4 border-blue-600' : 'text-gray-600 hover:bg-gray-50'}`}><span>📋</span> 求人管理</button>
-            <button onClick={() => setActiveView('create_job')} className={`text-left px-6 py-4 font-bold text-sm flex gap-3 whitespace-nowrap ${activeView === 'create_job' ? 'bg-blue-50 text-blue-600 md:border-l-4 md:border-b-0 border-b-4 border-blue-600' : 'text-gray-600 hover:bg-gray-50'}`}><span>✏️</span> 求人作成</button>
-            <button onClick={() => setActiveView('user_search')} className={`text-left px-6 py-4 font-bold text-sm flex gap-3 whitespace-nowrap ${activeView === 'user_search' ? 'bg-blue-50 text-blue-600 md:border-l-4 md:border-b-0 border-b-4 border-blue-600' : 'text-gray-600 hover:bg-gray-50'}`}><span>🔍</span> ユーザー・スカウト</button>
-            <button onClick={() => setActiveView('news_list')} className={`text-left px-6 py-4 font-bold text-sm flex gap-3 whitespace-nowrap ${['news_list', 'edit_news'].includes(activeView) ? 'bg-blue-50 text-blue-600 md:border-l-4 md:border-b-0 border-b-4 border-blue-600' : 'text-gray-600 hover:bg-gray-50'}`}><span>📢</span> お知らせ管理</button>
-            <button onClick={() => setActiveView('qr')} className={`text-left px-6 py-4 font-bold text-sm flex gap-3 whitespace-nowrap ${activeView === 'qr' ? 'bg-blue-50 text-blue-600 md:border-l-4 md:border-b-0 border-b-4 border-blue-600' : 'text-gray-600 hover:bg-gray-50'}`}><span>🎟️</span> QR発行</button>
-          </nav>
-
-          <main className="flex-1 bg-white rounded-xl shadow-sm border border-gray-200 min-h-[600px] p-4 sm:p-6 relative w-full overflow-hidden">
-            
-            {activeView === 'job_list' && (
-               <div className="animate-fade-in-up">
-                <h2 className="text-xl font-bold text-gray-800 mb-6">求人リスト</h2>
-                <div className="space-y-3">
-                  {jobs.map(job => {
-                    const isExpired = job.deadline && new Date(job.deadline) < new Date()
-                    return (
-                      <div key={job.id} onClick={() => handleJobClick(job)} className={`border p-4 rounded-xl cursor-pointer hover:shadow-md transition-all flex flex-col sm:flex-row justify-between sm:items-center gap-2 ${isExpired ? 'bg-gray-100 border-gray-200' : 'bg-white border-gray-200 hover:border-blue-300'}`}>
-                        <div>
-                          <div className="flex items-center gap-2 mb-1">
-                            {isExpired ? <span className="bg-gray-500 text-white text-[10px] px-2 py-0.5 rounded font-bold">期限切れ</span> : <span className="bg-green-500 text-white text-[10px] px-2 py-0.5 rounded font-bold">募集中</span>}
-                            <span className="text-xs text-gray-500 font-mono">{new Date(job.created_at).toLocaleDateString()} 作成</span>
-                          </div>
-                          <h3 className={`font-bold ${isExpired ? 'text-gray-500' : 'text-gray-800'}`}>{job.title}</h3>
-                          <p className="text-xs text-gray-500 mt-1">報酬: {job.reward_amount} / 条件: {job.required_rank}</p>
-                        </div>
-                        <span className="text-gray-400 text-sm text-right sm:text-left">詳細へ &rarr;</span>
-                      </div>
-                    )
-                  })}
-                </div>
-              </div>
-            )}
-
-            {activeView === 'job_detail' && selectedJob && (
-               <div className="animate-fade-in-up">
-                <button onClick={() => setActiveView('job_list')} className="mb-4 text-sm text-blue-600 hover:underline font-bold flex items-center gap-1">← 一覧に戻る</button>
-                <div className="bg-slate-50 p-6 rounded-xl border border-slate-200 mb-8 relative">
-                  <div className="absolute top-4 right-4"><button onClick={handleDeleteJob} className="text-xs bg-white text-red-600 border border-red-200 px-3 py-2 rounded hover:bg-red-50 font-bold shadow-sm">🗑️ 削除</button></div>
-                  <h2 className="text-2xl font-bold text-gray-800 mb-2 pr-16">{selectedJob.title}</h2>
-                  <div className="flex flex-wrap gap-3 text-sm text-gray-600 mb-4 font-mono">
-                    <span className="bg-white px-2 py-1 rounded border">💰 {selectedJob.reward_amount}</span>
-                    <span className="bg-white px-2 py-1 rounded border">🎓 {selectedJob.required_rank}以上</span>
-                    {selectedJob.required_badges && selectedJob.required_badges.length > 0 && (
-                      <span className="bg-white px-2 py-1 rounded border">🛡️ 必須バッジあり</span>
-                    )}
-                    {selectedJob.deadline && <span className="text-red-600 font-bold bg-white px-2 py-1 rounded border border-red-100">⏳ 期限: {new Date(selectedJob.deadline).toLocaleDateString()}</span>}
-                  </div>
-                  <p className="text-sm text-gray-700 whitespace-pre-wrap bg-white p-4 rounded border border-gray-200">{selectedJob.description}</p>
-                </div>
-                <h3 className="text-lg font-bold text-gray-800 mb-4 flex items-center gap-2"><span>👥</span> 応募者一覧 <span className="bg-blue-100 text-blue-800 text-xs px-2 py-0.5 rounded-full">{applicants.length}名</span></h3>
-                <div className="overflow-x-auto">
-                  <table className="w-full text-sm text-left text-gray-500 border-collapse min-w-[600px]">
-                    <thead className="text-xs text-gray-700 uppercase bg-gray-100 border-b"><tr><th className="px-4 py-3">ステータス</th><th className="px-4 py-3">応募者情報</th><th className="px-4 py-3 w-1/3">メッセージ</th><th className="px-4 py-3 text-right">アクション</th></tr></thead>
-                    <tbody>
-                      {applicants.map(app => (
-                        <tr key={app.id} className="bg-white border-b hover:bg-gray-50">
-                          <td className="px-4 py-4"><span className={`px-2 py-1 rounded text-xs font-bold text-white ${app.status === 'approved' ? 'bg-green-500' : app.status === 'rejected' ? 'bg-red-400' : 'bg-yellow-400'}`}>{app.status.toUpperCase()}</span></td>
-                          <td className="px-4 py-4"><div className="font-bold text-gray-900">{app.user.email}</div><div className="text-xs">Rank: {app.user.current_rank} / XP: {app.user.total_xp}</div></td>
-                          <td className="px-4 py-4 text-gray-600 italic">&quot;{app.message}&quot;</td>
-                          <td className="px-4 py-4 text-right">
-                            <div className="flex gap-2 justify-end items-center">
-                              <button onClick={() => openChat(app)} className="text-xs bg-slate-100 text-slate-600 px-3 py-1.5 rounded font-bold hover:bg-slate-200 flex items-center gap-1">💬 チャット</button>
-                              {app.status === 'pending' && (
-                                <>
-                                  <button onClick={() => updateStatus(app.id, 'rejected')} className="px-3 py-1.5 text-xs border border-red-200 text-red-600 rounded font-bold">不採用</button>
-                                  <button onClick={() => updateStatus(app.id, 'approved')} className="px-3 py-1.5 bg-blue-600 text-white rounded font-bold shadow-sm">採用</button>
-                                </>
-                              )}
-                            </div>
-                          </td>
-                        </tr>
-                      ))}
-                      {applicants.length === 0 && <tr><td colSpan={4} className="px-4 py-8 text-center text-gray-400">応募者はまだいません</td></tr>}
-                    </tbody>
-                  </table>
-                </div>
-              </div>
-            )}
-
-            {activeView === 'create_job' && (
-               <div className="animate-fade-in-up">
-                <h2 className="text-xl font-bold text-gray-800 mb-6">新規クエスト作成</h2>
-                <form onSubmit={handleCreateJob} className="space-y-5 max-w-lg">
-                  <div>
-                    <label className="block text-sm font-bold text-gray-700 mb-2">タイトル</label>
-                    <input type="text" required className="w-full p-3 border border-gray-300 rounded-lg" value={newJob.title} onChange={e => setNewJob({...newJob, title: e.target.value})} />
-                  </div>
-                  
-                  <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
-                    <div>
-                      <label className="block text-sm font-bold text-gray-700 mb-2">報酬額 (円)</label>
-                      <div className="relative">
-                        <input 
-                          type="number" 
-                          required 
-                          placeholder="例: 5000" 
-                          className="w-full p-3 border border-gray-300 rounded-lg pr-8" 
-                          value={newJob.reward_val} 
-                          onChange={e => setNewJob({...newJob, reward_val: e.target.value})} 
-                        />
-                        <span className="absolute right-3 top-3 text-gray-500 font-bold">円</span>
-                      </div>
-                    </div>
-                    <div>
-                      <label className="block text-sm font-bold text-gray-700 mb-2">必須ランク</label>
-                      <select className="w-full p-3 border border-gray-300 rounded-lg" value={newJob.required_rank} onChange={e => setNewJob({...newJob, required_rank: e.target.value})}>
-                        <option value="ビギナー">ビギナー以上</option>
-                        <option value="ブロンズ">ブロンズ以上</option>
-                        <option value="シルバー">シルバー以上</option>
-                        <option value="ゴールド">ゴールド以上</option>
-                      </select>
-                    </div>
-                  </div>
-
-                  <div>
-                    <label className="block text-sm font-bold text-gray-700 mb-2">必須称号 (任意・複数選択可)</label>
-                    <div className="bg-gray-50 p-4 rounded-lg border border-gray-200 max-h-40 overflow-y-auto grid grid-cols-2 gap-2">
-                      {allBadges.map(badge => (
-                        <label key={badge.id} className="flex items-center gap-2 cursor-pointer p-1 hover:bg-gray-100 rounded">
-                          <input 
-                            type="checkbox" 
-                            className="w-4 h-4 text-blue-600 rounded" 
-                            checked={newJobBadges.includes(badge.id)} 
-                            onChange={() => toggleJobBadge(badge.id)} 
-                          />
-                          <span className="text-xl">{badge.icon_url}</span>
-                          <span className="text-xs text-gray-700">{badge.name}</span>
-                        </label>
-                      ))}
-                      {allBadges.length === 0 && <span className="text-xs text-gray-400">登録された称号がありません</span>}
-                    </div>
-                  </div>
-
-                  <div><label className="block text-sm font-bold text-gray-700 mb-2">募集期限 (任意)</label><input type="date" className="w-full p-3 border border-gray-300 rounded-lg" value={newJob.deadline} onChange={e => setNewJob({...newJob, deadline: e.target.value})} /></div>
-                  <div><label className="block text-sm font-bold text-gray-700 mb-2">詳細内容</label><textarea required rows={5} className="w-full p-3 border border-gray-300 rounded-lg" value={newJob.description} onChange={e => setNewJob({...newJob, description: e.target.value})}></textarea></div>
-                  <button type="submit" disabled={isJobSubmitting} className="w-full bg-blue-600 text-white font-bold py-4 rounded-xl shadow-lg hover:bg-blue-700 disabled:opacity-50">{isJobSubmitting ? '作成中...' : '公開する'}</button>
-                </form>
-              </div>
-            )}
-
-            {activeView === 'news_list' && (
-              <div className="animate-fade-in-up">
-                <div className="mb-8 border-b border-gray-100 pb-8">
-                  <h3 className="font-bold text-gray-700 mb-4 flex items-center gap-2">📡 監視対象の管理</h3>
-                  <div className="grid gap-3 mb-4">
-                    {sources.map(src => (
-                      <div key={src.id} className="flex items-center justify-between bg-gray-50 p-3 rounded-lg border border-gray-200 text-sm">
-                        <div className="overflow-hidden mr-2">
-                          <div className="font-bold text-gray-800">{src.name}</div>
-                          <div className="text-xs text-gray-400 font-mono truncate">{src.rss_url}</div>
-                        </div>
-                        <button onClick={() => handleDeleteSource(src.id)} className="text-red-500 text-xs border border-red-200 px-3 py-1.5 rounded hover:bg-red-50 font-bold shrink-0">解除</button>
-                      </div>
-                    ))}
-                  </div>
-                  <div className="bg-gray-50 p-4 rounded-xl border border-gray-200">
-                    <h4 className="text-xs font-bold text-gray-500 mb-3">新規追加</h4>
-                    <div className="flex flex-col gap-3">
-                      <div className="flex gap-2 flex-col sm:flex-row">
-                        <input className="flex-1 border border-gray-300 rounded-lg p-2 text-sm" placeholder="名称 (例: 公式ブログ)" value={newSource.name} onChange={e => setNewSource({...newSource, name: e.target.value})} />
-                        <input className="flex-[2] border border-gray-300 rounded-lg p-2 text-sm" placeholder="RSS URL" value={newSource.rss_url} onChange={e => setNewSource({...newSource, rss_url: e.target.value})} />
-                      </div>
-                      <div className="flex gap-2">
-                        <input className="flex-[3] border border-gray-300 rounded-lg p-2 text-sm" placeholder="Fallback URL (任意)" value={newSource.fallback_url} onChange={e => setNewSource({...newSource, fallback_url: e.target.value})} />
-                        <button onClick={handleAddSource} className="bg-slate-800 text-white px-6 py-2 rounded-lg text-sm font-bold hover:bg-slate-900 shadow-sm shrink-0">追加</button>
-                      </div>
-                    </div>
-                  </div>
-                </div>
-
-                <div className="flex justify-between items-center mb-6">
-                  <h2 className="text-xl font-bold text-gray-800">お知らせリスト</h2>
-                  <div className="flex gap-2">
-                     <button onClick={handleSyncNews} disabled={isSyncingNews} className="bg-green-600 text-white px-3 py-2 rounded-lg font-bold hover:bg-green-700 text-xs sm:text-sm flex items-center gap-1">{isSyncingNews ? '...' : '🔄 同期'}</button>
-                     <button onClick={openCreateNews} className="bg-blue-600 text-white px-3 py-2 rounded-lg font-bold hover:bg-blue-700 text-xs sm:text-sm">+ 新規</button>
-                  </div>
-                </div>
-                <div className="space-y-3">
-                  {newsList.map(news => (
-                    <div key={news.id} className="flex justify-between items-center bg-white p-4 rounded-xl shadow-sm border border-gray-100">
-                       <div className="flex-1 min-w-0">
-                          <div className="flex items-center gap-2 mb-1">
-                             <span className="text-[10px] font-bold bg-gray-100 text-gray-500 px-2 py-0.5 rounded shrink-0">{news.source_name}</span>
-                             <span className="text-xs text-gray-400 shrink-0">{new Date(news.published_at).toLocaleDateString()}</span>
-                          </div>
-                          <h3 className="font-bold text-gray-800 text-sm truncate">{news.title}</h3>
-                       </div>
-                       <div className="flex gap-2 ml-4 shrink-0">
-                          <button onClick={() => openEditNews(news)} className="p-2 text-gray-500 hover:bg-gray-100 rounded-lg text-xs font-bold border border-gray-200">編集</button>
-                          <button onClick={() => handleDeleteNews(news.id)} className="p-2 text-red-500 hover:bg-red-50 rounded-lg text-xs font-bold border border-red-100">削除</button>
-                       </div>
-                    </div>
-                  ))}
-                  {newsList.length === 0 && <div className="text-center p-8 text-gray-400 text-sm">お知らせはありません</div>}
-                </div>
-              </div>
-            )}
-
-            {activeView === 'edit_news' && (
-              <div className="animate-fade-in-up">
-                 <button onClick={() => setActiveView('news_list')} className="mb-4 text-sm text-blue-600 hover:underline font-bold">← リストに戻る</button>
-                 <h2 className="text-xl font-bold text-gray-800 mb-6">{editingNewsId ? '編集' : '新規作成'}</h2>
-                 <form onSubmit={handleSaveNews} className="space-y-4 max-w-md">
-                   <div><label className="block text-sm font-bold text-gray-700 mb-2">タイトル</label><input type="text" required className="w-full p-3 border border-gray-300 rounded-lg" value={newsForm.title} onChange={e => setNewsForm({...newsForm, title: e.target.value})} /></div>
-                   <div><label className="block text-sm font-bold text-gray-700 mb-2">発信元</label><input type="text" className="w-full p-3 border border-gray-300 rounded-lg" value={newsForm.source_name} onChange={e => setNewsForm({...newsForm, source_name: e.target.value})} /></div>
-                   <div><label className="block text-sm font-bold text-gray-700 mb-2">URL</label><input type="url" className="w-full p-3 border border-gray-300 rounded-lg" value={newsForm.link_url} onChange={e => setNewsForm({...newsForm, link_url: e.target.value})} /></div>
-                   <div><label className="block text-sm font-bold text-gray-700 mb-2">本文</label><textarea rows={6} className="w-full p-3 border border-gray-300 rounded-lg" value={newsForm.content} onChange={e => setNewsForm({...newsForm, content: e.target.value})} /></div>
-                   <button type="submit" disabled={isNewsSubmitting} className="w-full bg-blue-600 text-white font-bold py-3 rounded-xl hover:bg-blue-700 disabled:opacity-50 mt-4 shadow-md">{isNewsSubmitting ? '保存中...' : '保存'}</button>
-                 </form>
-              </div>
-            )}
-
-            {activeView === 'user_search' && (
-              <div className="animate-fade-in-up">
-                <h2 className="text-xl font-bold text-gray-800 mb-6">ユーザー検索・一斉スカウト</h2>
-                
-                <div className="bg-gray-50 p-4 rounded-xl border border-gray-200 mb-4 flex flex-col sm:flex-row gap-4 items-end sm:items-center justify-between">
-                  <div className="flex flex-col sm:flex-row gap-3 w-full sm:w-auto">
-                    <div>
-                      <label className="text-xs font-bold text-gray-500 block mb-1">ランクで絞り込み</label>
-                      <select className="p-2 border border-gray-300 rounded text-sm w-full sm:w-32" value={filterRank} onChange={e => setFilterRank(e.target.value)}>
-                        <option value="all">全て</option>
-                        <option value="ビギナー">ビギナー</option>
-                        <option value="ブロンズ">ブロンズ</option>
-                        <option value="シルバー">シルバー</option>
-                        <option value="ゴールド">ゴールド</option>
-                        <option value="プラチナ">プラチナ</option>
-                      </select>
-                    </div>
-                    <div>
-                      <label className="text-xs font-bold text-gray-500 block mb-1">保有バッジで絞り込み</label>
-                      <select className="p-2 border border-gray-300 rounded text-sm w-full sm:w-40" value={filterBadge} onChange={e => setFilterBadge(e.target.value === 'all' ? 'all' : Number(e.target.value))}>
-                        <option value="all">全て</option>
-                        {allBadges.map(b => <option key={b.id} value={b.id}>{b.name}</option>)}
-                      </select>
-                    </div>
-                  </div>
-                  
-                  <div className="w-full sm:w-auto flex gap-2 justify-end">
-                    {selectedUserIds.size > 0 && (
-                      <>
-                         <button onClick={clearSelection} className="text-gray-500 text-xs font-bold underline px-2">選択解除</button>
-                         <button onClick={() => openScoutModal(filteredUsers.filter(u => selectedUserIds.has(u.id)))} className="bg-indigo-600 text-white px-4 py-2 rounded-lg font-bold shadow-md hover:bg-indigo-700 text-sm animate-bounce-in">
-                           {selectedUserIds.size}人にスカウトを送る
-                         </button>
-                      </>
-                    )}
-                  </div>
-                </div>
-
-                <div className="overflow-x-auto bg-white rounded-xl border border-gray-200">
-                  <table className="w-full text-sm text-left min-w-[600px]">
-                    <thead className="text-xs text-gray-700 uppercase bg-gray-50 border-b">
-                      <tr>
-                        <th className="px-4 py-3 w-10">
-                          <input type="checkbox" onChange={(e) => e.target.checked ? selectAllFilteredUsers() : clearSelection()} checked={selectedUserIds.size > 0 && selectedUserIds.size === filteredUsers.length} />
-                        </th>
-                        <th className="px-6 py-3">ユーザー</th>
-                        <th className="px-6 py-3">ランク / XP</th>
-                        <th className="px-6 py-3">獲得バッジ</th>
-                        <th className="px-6 py-3 text-right">アクション</th>
-                      </tr>
-                    </thead>
-                    <tbody>
-                      {filteredUsers.map(user => (
-                        <tr key={user.id} className={`border-b hover:bg-gray-50 ${selectedUserIds.has(user.id) ? 'bg-indigo-50' : 'bg-white'}`}>
-                          <td className="px-4 py-4">
-                            <input type="checkbox" checked={selectedUserIds.has(user.id)} onChange={() => toggleUserSelection(user.id)} />
-                          </td>
-                          <td className="px-6 py-4 font-bold text-gray-800">
-                             {user.username || 'No Name'}
-                             <div className="text-[10px] font-normal text-gray-400">{user.email}</div>
-                          </td>
-                          <td className="px-6 py-4">
-                             <span className={`px-2 py-0.5 rounded text-[10px] font-bold border ${user.current_rank === 'プラチナ' ? 'bg-purple-100 text-purple-600 border-purple-200' : 'bg-gray-100 text-gray-600 border-gray-200'}`}>
-                               {user.current_rank}
-                             </span>
-                             <div className="text-xs text-gray-500 mt-1">{user.total_xp} XP</div>
-                          </td>
-                          <td className="px-6 py-4">
-                             <div className="flex flex-wrap gap-1">
-                                {user.user_badges && user.user_badges.length > 0 ? (
-                                  user.user_badges.map((ub, i) => (
-                                     ub.badge ? <span key={i} title={ub.badge.name} className="text-lg cursor-help">{ub.badge.icon_url}</span> : null
-                                  ))
-                                ) : <span className="text-xs text-gray-300">-</span>}
-                             </div>
-                          </td>
-
-                          <td className="px-6 py-4 text-right">
-                              {/* ★ flexコンテナを追加してボタンを横並びにする */}
-                              <div className="flex justify-end gap-2">
-      
-                               {/* ★追加する通知ボタン */}
-                              <button 
-                                onClick={() => handleSendPush(user.id, user.username || 'No Name')}
-                                className="bg-orange-500 text-white px-3 py-1.5 rounded text-xs font-bold hover:bg-orange-600 shadow-sm whitespace-nowrap"
-                              >
-                                🔔 通知
-                              </button>
-
-                              {/* 既存のスカウトボタン */}
-                              <button 
-                                onClick={() => openScoutModal([user])}
-                                className="bg-indigo-600 text-white px-3 py-1.5 rounded text-xs font-bold hover:bg-indigo-700 shadow-sm whitespace-nowrap"
-                              >
-                                個別スカウト
-                             </button>
-      
-                           </div>
-                         </td>
-                        </tr>
-                      ))}
-                      {filteredUsers.length === 0 && <tr><td colSpan={5} className="text-center py-8 text-gray-400">条件に合うユーザーがいません</td></tr>}
-                    </tbody>
-                  </table>
-                </div>
-              </div>
-            )}
-
-            {activeView === 'qr' && (
-              <div className="animate-fade-in-up">
-                <h2 className="text-xl font-bold text-gray-800 mb-6">イベントQR発行</h2>
-                <div className="bg-gray-50 p-6 rounded-xl border border-gray-200 mb-6">
-                  <select className="w-full p-3 border border-gray-300 rounded-lg mb-4" onChange={handleEventSelect} value={selectedEventId || ''}>
-                    <option value="">-- イベントを選択 --</option>
-                    {events.map(ev => <option key={ev.id} value={ev.id}>{ev.event_date} : {ev.title}</option>)}
-                  </select>
-                  <button onClick={generateNewQr} disabled={!selectedEventId || isQrProcessing} className="w-full py-3 bg-blue-600 text-white font-bold rounded-xl disabled:bg-gray-400">QRコードを発行</button>
-                </div>
-                {qrValue && (
-                  <div className="text-center">
-                    <div className="bg-white p-6 inline-block border-4 border-dashed border-gray-200 rounded-xl mb-4">
-                      <QRCodeSVG value={qrValue} size={300} />
-                    </div>
-                    <p className="text-xs text-gray-500 font-mono mb-4">{qrValue}</p>
-                    <button onClick={handlePrintQr} className="bg-gray-800 text-white px-6 py-2 rounded-full font-bold hover:bg-gray-900 shadow-lg flex items-center gap-2 mx-auto">
-                      <span>🖨️</span> QRコードを印刷する
-                    </button>
-                  </div>
-                )}
-              </div>
-            )}
-
-            {scoutForm.targetUserIds.length > 0 && (
-              <div className="fixed inset-0 bg-black/50 z-50 flex items-center justify-center p-4">
-                 <div className="bg-white rounded-xl shadow-2xl w-full max-w-md overflow-hidden animate-fade-in-up">
-                    <div className="bg-indigo-600 p-4 text-white font-bold flex justify-between">
-                       <span>スカウト送信</span>
-                       <button onClick={() => setScoutForm({ targetUserIds: [], targetUserNames: [], jobId: '', message: '' })}>✕</button>
-                    </div>
-                    <form onSubmit={handleSendScout} className="p-6 space-y-4">
-                       <div>
-                          <label className="block text-xs font-bold text-gray-500 mb-1">送信先</label>
-                          <div className="font-bold text-gray-800 text-sm max-h-20 overflow-y-auto border p-2 rounded bg-gray-50">
-                            {scoutForm.targetUserNames.join(', ')}
-                            <span className="text-gray-400 ml-1">({scoutForm.targetUserIds.length}名)</span>
-                          </div>
-                       </div>
-                       <div>
-                          <label className="block text-xs font-bold text-gray-500 mb-1">アサインしたい案件</label>
-                          <select 
-                             className="w-full p-2 border border-gray-300 rounded"
-                             value={scoutForm.jobId}
-                             onChange={e => setScoutForm({...scoutForm, jobId: e.target.value})}
-                             required
-                          >
-                             {jobs.map(job => (
-                                <option key={job.id} value={job.id}>{job.title}</option>
-                             ))}
-                          </select>
-                       </div>
-                       <div>
-                          <label className="block text-xs font-bold text-gray-500 mb-1">メッセージ (全員共通)</label>
-                          <textarea 
-                             className="w-full p-2 border border-gray-300 rounded h-32"
-                             value={scoutForm.message}
-                             onChange={e => setScoutForm({...scoutForm, message: e.target.value})}
-                             required
-                          ></textarea>
-                       </div>
-                       <button 
-                          type="submit" 
-                          disabled={isScoutSending}
-                          className="w-full bg-indigo-600 text-white py-3 rounded font-bold hover:bg-indigo-700 disabled:opacity-50"
-                       >
-                          {isScoutSending ? '送信中...' : 'オファーを確定する'}
-                       </button>
-                    </form>
-                 </div>
-              </div>
-            )}
-
-            {activeChatApplicant && (
-              <div className="fixed inset-0 bg-black/50 z-50 flex items-center justify-center p-4">
-                 <div className="bg-white w-full max-w-lg h-[80vh] rounded-xl shadow-2xl flex flex-col overflow-hidden animate-fade-in-up">
-                    <div className="bg-slate-800 text-white px-4 py-3 flex justify-between items-center">
-                       <div><span className="text-xs font-bold text-slate-400">対話相手:</span> {activeChatApplicant.user.email}</div>
-                       <button onClick={() => setActiveChatApplicant(null)}>✕</button>
-                    </div>
-                    <div className="flex-1 overflow-y-auto p-4 space-y-4 bg-slate-50">
-                       {chatMessages.map(msg => {
-                         const isAdmin = msg.sender_id !== activeChatApplicant.user_id
-                         return (
-                           <div key={msg.id} className={`flex ${isAdmin ? 'justify-end' : 'justify-start'}`}>
-                              <div className={`p-3 rounded-xl max-w-[80%] text-sm ${isAdmin ? 'bg-blue-600 text-white rounded-tr-none' : 'bg-white border border-gray-200 rounded-tl-none'}`}>
-                                <p className="whitespace-pre-wrap">{msg.content}</p>
-                                <div className={`text-[10px] text-right mt-1 ${isAdmin ? 'text-blue-200' : 'text-gray-400'}`}>{new Date(msg.created_at).toLocaleTimeString([], {hour: '2-digit', minute:'2-digit'})}</div>
-                              </div>
-                           </div>
-                         )
-                       })}
-                       <div ref={messagesEndRef} />
-                    </div>
-                    <form onSubmit={handleAdminSendMessage} className="p-3 bg-white border-t flex gap-2">
-                       <input className="flex-1 bg-gray-100 border-0 rounded-full px-4 py-2 focus:ring-2 focus:ring-blue-500 focus:outline-none" value={chatInput} onChange={e => setChatInput(e.target.value)} placeholder="管理者として返信..." />
-                       <button type="submit" disabled={isChatSending} className="bg-blue-600 text-white px-4 py-2 rounded-full font-bold hover:bg-blue-700 disabled:opacity-50">送信</button>
-                    </form>
-                 </div>
-              </div>
-            )}
-
-          </main>
-        </div>
+  // ★修正2: ブラウザが対応していない場合のエラー表示
+  if (!isSupported) {
+    return (
+      <div className="bg-gray-100 p-4 rounded-xl border border-gray-200 mt-4">
+        <p className="text-xs text-red-500 font-bold">
+          ⚠️ この端末またはブラウザは通知に対応していません。
+        </p>
+        <p className="text-[10px] text-gray-500 mt-1">
+          ※iPhoneの場合は iOS 16.4以上 にアップデートし、
+          ホーム画面に追加したアイコンから起動してください。
+        </p>
       </div>
+    )
+  }
 
-      <div className="hidden print:flex print:flex-col print:items-center print:justify-center print:min-h-screen p-10 text-center">
-        <h1 className="text-3xl font-bold mb-4">{events.find(e => e.id === selectedEventId)?.title}</h1>
-        <p className="text-xl mb-8">チェックイン用QRコード</p>
-        <div className="border-4 border-black p-4 inline-block mb-8">
-           {qrValue && <QRCodeSVG value={qrValue} size={500} />}
-        </div>
-        <p className="text-sm text-gray-500">しずおかコネクト - イベントチェックイン</p>
+  // ★修正3: ここまで来たら「未登録＆対応端末」なので、登録ボタンを表示
+  return (
+    <div className="bg-white p-4 rounded-xl border border-gray-200 shadow-sm mt-4">
+      <h3 className="font-bold text-gray-800 mb-2 flex items-center gap-2">
+        <span>🔔</span> プッシュ通知
+      </h3>
+      <div>
+        <p className="text-xs text-gray-500 mb-3">
+          重要なクエストやイベント情報を見逃さないように通知を受け取りましょう。
+        </p>
+        <button
+          onClick={handleSubscribe}
+          disabled={loading}
+          className="w-full bg-indigo-600 text-white py-2 rounded-lg font-bold text-sm hover:bg-indigo-700 disabled:opacity-50"
+        >
+          {loading ? '設定中...' : '通知を受け取る'}
+        </button>
       </div>
     </div>
   )
@@ -3117,6 +2136,40 @@ export default function Home() {
 }
 </file>
 
+<file path="public/sw.js">
+// public/sw.js
+// Version 1.0.1
+
+self.addEventListener('push', function (event) {
+
+  console.log('Push received!'); // スマホをPCに繋いでいればログで見えます
+  
+  const promise = self.registration.pushManager.getSubscription()
+    .then(subscription => {
+      if (!subscription) throw new Error('No subscription found');
+      
+      const endpoint = encodeURIComponent(subscription.endpoint);
+      // ★絶対パスで指定することを確認
+      return fetch(`/api/push/get-message?endpoint=${endpoint}`);
+    })
+  // ...（以下、
+    .then(res => res.json())
+    .then(data => {
+      // 3. APIから届いたタイトルと本文を表示
+      return self.registration.showNotification(data.title || 'しずおかコネクト', {
+        body: data.body || '新着のお知らせがあります', // データがない時の予備
+        icon: '/logo.png',
+        badge: '/logo.png',
+      });
+    })
+    .catch(err => {
+      console.error('Push fetch error:', err);
+    });
+
+  event.waitUntil(promise);
+});
+</file>
+
 <file path="tsconfig.json">
 {
   "compilerOptions": {
@@ -3355,6 +2408,1040 @@ export default function AdminQRPage() {
     <Suspense fallback={<div>Loading...</div>}>
       <AdminQRContent />
     </Suspense>
+  )
+}
+</file>
+
+<file path="app/components/mypage/AdminView.tsx">
+'use client'
+
+import { useEffect, useState, useRef } from 'react'
+import { supabase } from '@/app/lib/supabaseClient'
+import { eventSupabase } from '@/app/lib/eventDbClient'
+import { useRouter } from 'next/navigation'
+import { QRCodeSVG } from 'qrcode.react'
+
+// --- 定数 & 型定義 ---
+const ADMIN_EMAILS = [
+  'admin@test.com',
+  'campustocommunityshizuoka@gmail.com'
+]
+
+type ExternalEvent = {
+  id: number
+  title: string
+  event_date: string
+  poster_id?: string
+}
+
+type NewsSource = {
+  id: number
+  name: string
+  rss_url: string
+  fallback_url: string | null
+  is_active: boolean
+}
+
+type Job = {
+  id: number
+  title: string
+  description: string
+  reward_amount: string
+  required_rank: string
+  required_badges: number[] | null
+  deadline: string | null
+  created_at: string
+}
+
+type Badge = {
+  id: number
+  name: string
+  icon_url: string
+}
+
+type UserProfile = {
+  id: string
+  email: string
+  username: string | null
+  current_rank: string
+  total_xp: number
+  user_badges: {
+    badge: Badge | null
+  }[]
+}
+
+type Applicant = {
+  id: number
+  user_id: string
+  status: 'pending' | 'approved' | 'rejected'
+  message: string
+  created_at: string
+  user: {
+    email: string
+    current_rank: string
+    total_xp: number
+  }
+}
+
+type NewsFeed = {
+  id: number
+  title: string
+  link_url: string | null
+  content: string | null
+  source_name: string | null
+  published_at: string
+  image_url: string | null
+}
+
+type NewsFormState = {
+  title: string
+  link_url: string
+  content: string
+  source_name: string
+  image_url: string
+}
+
+type ScoutFormState = {
+  targetUserIds: string[]
+  targetUserNames: string[]
+  jobId: string
+  message: string
+}
+
+type ChatMessage = {
+  id: number
+  content: string
+  sender_id: string
+  created_at: string
+}
+
+export default function AdminView({ userEmail }: { userEmail: string }) {
+  const router = useRouter()
+  const [loading, setLoading] = useState(true)
+  
+  type ViewState = 'job_list' | 'job_detail' | 'create_job' | 'qr' | 'news_list' | 'edit_news' | 'user_search'
+  const [activeView, setActiveView] = useState<ViewState>('job_list')
+
+  const [allBadges, setAllBadges] = useState<Badge[]>([])
+
+  const [events, setEvents] = useState<ExternalEvent[]>([])
+  const [selectedEventId, setSelectedEventId] = useState<number | null>(null)
+  const [qrValue, setQrValue] = useState('')
+  const [isQrProcessing, setIsQrProcessing] = useState(false)
+
+  const [jobs, setJobs] = useState<Job[]>([])
+  const [selectedJobId, setSelectedJobId] = useState<number | null>(null)
+  const [selectedJob, setSelectedJob] = useState<Job | null>(null)
+  const [applicants, setApplicants] = useState<Applicant[]>([])
+
+  const [newJob, setNewJob] = useState({
+    title: '', description: '', reward_val: '', required_rank: 'ビギナー', deadline: ''
+  })
+  const [newJobBadges, setNewJobBadges] = useState<number[]>([]) 
+  const [isJobSubmitting, setIsJobSubmitting] = useState(false)
+
+  const [newsList, setNewsList] = useState<NewsFeed[]>([])
+  const [editingNewsId, setEditingNewsId] = useState<number | null>(null)
+  const [newsForm, setNewsForm] = useState<NewsFormState>({
+    title: '', link_url: '', content: '', source_name: '公式お知らせ', image_url: ''
+  })
+  const [isNewsSubmitting, setIsNewsSubmitting] = useState(false)
+  const [isSyncingNews, setIsSyncingNews] = useState(false)
+
+  const [sources, setSources] = useState<NewsSource[]>([])
+  const [newSource, setNewSource] = useState({ name: '', rss_url: '', fallback_url: '' })
+
+  const [users, setUsers] = useState<UserProfile[]>([])
+  const [filterRank, setFilterRank] = useState<string>('all')
+  const [filterBadge, setFilterBadge] = useState<number | 'all'>('all')
+  const [selectedUserIds, setSelectedUserIds] = useState<Set<string>>(new Set())
+
+  const [scoutForm, setScoutForm] = useState<ScoutFormState>({
+    targetUserIds: [], targetUserNames: [], jobId: '', message: ''
+  })
+  const [isScoutSending, setIsScoutSending] = useState(false)
+
+  const [activeChatApplicant, setActiveChatApplicant] = useState<Applicant | null>(null)
+  const [chatMessages, setChatMessages] = useState<ChatMessage[]>([])
+  const [chatInput, setChatInput] = useState('')
+  const [isChatSending, setIsChatSending] = useState(false)
+  const messagesEndRef = useRef<HTMLDivElement>(null)
+
+  useEffect(() => {
+    if (!ADMIN_EMAILS.includes(userEmail)) {
+      alert('権限がありません')
+      router.push('/')
+      return
+    }
+    const init = async () => {
+      const { data: eventData } = await eventSupabase
+        .from('events')
+        .select('id, title, event_date')
+        .order('event_date', { ascending: false })
+        .returns<ExternalEvent[]>()
+      setEvents(eventData || [])
+
+      const { data: badgeData } = await supabase.from('badges').select('*').returns<Badge[]>()
+      setAllBadges(badgeData || [])
+      
+      void fetchJobs()
+      void fetchNews()
+      void fetchSources()
+      void fetchUsers()
+      setLoading(false)
+    }
+    void init()
+  }, [userEmail, router])
+
+  const fetchJobs = async () => {
+    const { data } = await supabase.from('jobs').select('*').order('created_at', { ascending: false }).returns<Job[]>()
+    setJobs(data || [])
+  }
+
+  const fetchNews = async () => {
+    const { data } = await supabase.from('news_feeds').select('*').order('published_at', { ascending: false }).returns<NewsFeed[]>()
+    setNewsList(data || [])
+  }
+
+  const fetchSources = async () => {
+    const { data } = await supabase.from('news_sources').select('*').order('id').returns<NewsSource[]>()
+    setSources(data || [])
+  }
+
+  const fetchUsers = async () => {
+    const { data } = await supabase
+      .from('profiles')
+      .select(`
+        id, email, username, current_rank, total_xp,
+        user_badges (
+          badge:badges ( id, name, icon_url )
+        )
+      `)
+      .order('total_xp', { ascending: false })
+      .returns<UserProfile[]>()
+
+    setUsers(data || [])
+  }
+
+  const handleJobClick = async (job: Job) => {
+    setSelectedJobId(job.id)
+    setSelectedJob(job)
+    setActiveView('job_detail')
+    
+    const { data: appData } = await supabase
+      .from('job_applications')
+      .select(`id, user_id, status, message, created_at, user:profiles ( email, current_rank, total_xp )`)
+      .eq('job_id', job.id)
+      .order('created_at', { ascending: false })
+
+    type AppResponse = {
+        id: number; user_id: string; status: string; message: string; created_at: string;
+        user: { email: string; current_rank: string; total_xp: number } | null
+    }
+    
+    const formattedApplicants: Applicant[] = ((appData as unknown) as AppResponse[] || []).map((app) => ({
+      id: app.id,
+      user_id: app.user_id,
+      status: (app.status as 'pending' | 'approved' | 'rejected'),
+      message: app.message,
+      created_at: app.created_at,
+      user: {
+        email: app.user?.email || 'Unknown',
+        current_rank: app.user?.current_rank || 'ビギナー',
+        total_xp: app.user?.total_xp || 0
+      }
+    }))
+    setApplicants(formattedApplicants)
+  }
+
+  const handleDeleteJob = async () => {
+    if (!selectedJobId) return
+    if (!confirm('本当にこのクエストを削除しますか？\n応募データも全て削除されます。')) return
+
+    const { error } = await supabase.from('jobs').delete().eq('id', selectedJobId)
+    if (error) alert('削除失敗: ' + error.message)
+    else { alert('削除しました'); void fetchJobs(); setActiveView('job_list') }
+  }
+
+  const updateStatus = async (appId: number, newStatus: 'approved' | 'rejected') => {
+    if (!confirm(`${newStatus === 'approved' ? '採用' : '不採用'}にしますか？`)) return
+    const { error } = await supabase.from('job_applications').update({ status: newStatus }).eq('id', appId)
+    if (!error) {
+        setApplicants(prev => prev.map(a => a.id === appId ? { ...a, status: newStatus } : a))
+    }
+    else alert('更新失敗')
+  }
+
+  const handleCreateJob = async (e: React.FormEvent) => {
+    e.preventDefault()
+    if (!confirm('公開しますか？')) return
+    setIsJobSubmitting(true)
+    try {
+      const { data: { user } } = await supabase.auth.getUser()
+      const rewardFormatted = newJob.reward_val ? `${Number(newJob.reward_val).toLocaleString()}円` : '応相談'
+
+      // 1. クエストデータの保存
+      const { error } = await supabase.from('jobs').insert({
+        title: newJob.title,
+        description: newJob.description,
+        reward_amount: rewardFormatted,
+        required_rank: newJob.required_rank,
+        required_badges: newJobBadges.length > 0 ? newJobBadges : null,
+        deadline: newJob.deadline || null,
+        owner_id: user?.id,
+        is_active: true
+      })
+      if (error) throw error
+      
+      // 2. ★追加: 全員に通知を送る (エラーが出てもクエスト作成自体は成功扱いにするため try-catch を分けるのがベター)
+      try {
+        await fetch('/api/admin/broadcast', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            title: '新着クエスト！',
+            body: `新しい募集「${newJob.title}」が公開されました。報酬: ${rewardFormatted}`,
+            url: '/mypage?tab=quests' // クエストタブを開くように誘導
+          })
+        })
+      } catch (notifyError) {
+        console.error('Notification failed', notifyError)
+      }
+
+      alert('作成しました！通知も送信しました。')
+      
+      setNewJob({ title: '', description: '', reward_val: '', required_rank: 'ビギナー', deadline: '' })
+      setNewJobBadges([])
+      
+      void fetchJobs()
+      setActiveView('job_list')
+    } catch (e) {
+      if (e instanceof Error) alert('作成エラー: ' + e.message)
+    } finally {
+      setIsJobSubmitting(false)
+    }
+  }
+
+  const toggleJobBadge = (badgeId: number) => {
+    setNewJobBadges(prev => 
+      prev.includes(badgeId) ? prev.filter(id => id !== badgeId) : [...prev, badgeId]
+    )
+  }
+
+  const handleEventSelect = async (e: React.ChangeEvent<HTMLSelectElement>) => {
+    const eid = Number(e.target.value)
+    setSelectedEventId(eid || null)
+    setQrValue('')
+    if (eid) {
+      const { data } = await supabase.from('event_secrets').select('secret_code').eq('event_id', eid).single()
+      if (data) setQrValue(data.secret_code)
+    }
+  }
+  const generateNewQr = async () => {
+    if (!selectedEventId || !confirm('新しいQRを発行しますか？')) return
+    setIsQrProcessing(true)
+    try {
+      const secret = `evt-${selectedEventId}-${Math.random().toString(36).substring(2, 10)}`
+      await supabase.from('event_secrets').delete().eq('event_id', selectedEventId)
+      await supabase.from('event_secrets').insert({ event_id: selectedEventId, secret_code: secret })
+      setQrValue(secret)
+    } catch { alert('エラー') } finally { setIsQrProcessing(false) }
+  }
+
+  const handlePrintQr = () => {
+    window.print()
+  }
+
+  const handleSyncNews = async () => {
+    setIsSyncingNews(true)
+    try {
+      const { data: { session } } = await supabase.auth.getSession()
+      const token = session?.access_token
+
+      const res = await fetch('/api/fetch-news', { 
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'X-Supabase-Auth': token || '' 
+        }
+      })
+      
+      const data = await res.json()
+      if (data.success) {
+        alert(data.message)
+        void fetchNews()
+      } else {
+        alert('同期エラー: ' + (data.message || '詳細不明'))
+      }
+    } catch (e) {
+      // eslint-disable-next-line @typescript-eslint/no-unused-vars
+      const _ = e
+      alert('通信エラーが発生しました')
+    } finally {
+      setIsSyncingNews(false)
+    }
+  }
+
+  const handleAddSource = async () => {
+    if (!newSource.name || !newSource.rss_url) return alert('名称とRSS URLは必須です')
+    const { error } = await supabase.from('news_sources').insert({ name: newSource.name, rss_url: newSource.rss_url, fallback_url: newSource.fallback_url || null })
+    if (error) alert('エラー: ' + error.message)
+    else { setNewSource({ name: '', rss_url: '', fallback_url: '' }); fetchSources() }
+  }
+  const handleDeleteSource = async (id: number) => {
+    if (!confirm('監視を解除しますか？')) return
+    const { error } = await supabase.from('news_sources').delete().eq('id', id)
+    if(error) alert('エラー: ' + error.message); else fetchSources()
+  }
+  const openCreateNews = () => { setEditingNewsId(null); setNewsForm({ title: '', link_url: '', content: '', source_name: '公式お知らせ', image_url: '' }); setActiveView('edit_news') }
+  const openEditNews = (news: NewsFeed) => { setEditingNewsId(news.id); setNewsForm({ title: news.title, link_url: news.link_url || '', content: news.content || '', source_name: news.source_name || '', image_url: news.image_url || '' }); setActiveView('edit_news') }
+  const handleDeleteNews = async (id: number) => {
+    if (!confirm('本当に削除しますか？')) return
+    const { error } = await supabase.from('news_feeds').delete().eq('id', id)
+    if (error) alert('削除失敗: ' + error.message); else void fetchNews()
+  }
+
+  const handleSaveNews = async (e: React.FormEvent) => {
+    e.preventDefault()
+    alert("🔥 コードは更新されています！保存処理を開始します。")
+    console.log("★ handleSaveNews 開始") // ログ追加
+
+    setIsNewsSubmitting(true)
+    const saveData = { title: newsForm.title, link_url: newsForm.link_url || null, content: newsForm.content || null, source_name: newsForm.source_name || 'お知らせ', image_url: newsForm.image_url || null, published_at: undefined as string | undefined }
+    
+    try {
+      if (editingNewsId) {
+        // ... (編集処理)
+      } else {
+        console.log("★ 新規作成処理 開始") // ログ追加
+        saveData.published_at = new Date().toISOString()
+        const { error } = await supabase.from('news_feeds').insert(saveData)
+        if (error) throw error;
+        
+        console.log("★ DB保存成功。通知APIを呼び出します...") // ログ追加
+
+        // --- 通知送信 (Broadcast API) ---
+        const res = await fetch('/api/admin/broadcast', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            title: '📢 新着のお知らせ',
+            body: newsForm.title,
+            url: '/mypage?tab=info'
+          })
+        })
+        console.log("★ 通知API応答ステータス:", res.status) // ログ追加
+        // -----------------------------
+
+        alert('作成しました')
+      }
+      void fetchNews(); setActiveView('news_list')
+    } catch (e: unknown) {
+      console.error("★ エラー発生:", e) // エラー詳細を表示
+      if (e instanceof Error) alert('エラー: ' + e.message) 
+    } finally { setIsNewsSubmitting(false) }
+  }
+
+  const toggleUserSelection = (userId: string) => {
+    const newSet = new Set(selectedUserIds)
+    if (newSet.has(userId)) newSet.delete(userId)
+    else newSet.add(userId)
+    setSelectedUserIds(newSet)
+  }
+
+  const selectAllFilteredUsers = () => {
+    const newSet = new Set(selectedUserIds)
+    filteredUsers.forEach(u => newSet.add(u.id))
+    setSelectedUserIds(newSet)
+  }
+
+  const clearSelection = () => setSelectedUserIds(new Set())
+
+  const filteredUsers = users.filter(user => {
+    const rankMatch = filterRank === 'all' || user.current_rank === filterRank
+    const badgeMatch = filterBadge === 'all' || user.user_badges.some(ub => ub.badge?.id === filterBadge)
+    return rankMatch && badgeMatch
+  })
+
+  const openScoutModal = (targets: UserProfile[]) => {
+    if (jobs.length === 0) {
+      alert('スカウトを送るには、先に「求人作成」でクエストを作成してください。')
+      return
+    }
+    
+    setScoutForm({
+      targetUserIds: targets.map(u => u.id),
+      targetUserNames: targets.map(u => u.username || u.email),
+      jobId: jobs[0].id.toString(),
+      message: 'あなたのプロフィールを拝見し、ぜひこのプロジェクトに参加していただきたいと思いました。'
+    })
+  }
+
+  const handleSendScout = async (e: React.FormEvent) => {
+    e.preventDefault()
+    if (scoutForm.targetUserIds.length === 0) return
+    const count = scoutForm.targetUserIds.length
+    if (!confirm(`${count}名にスカウトを一斉送信しますか？`)) return
+
+    setIsScoutSending(true)
+    try {
+      // 1. DB保存
+      const insertData = scoutForm.targetUserIds.map(uid => ({
+        user_id: uid,
+        job_id: Number(scoutForm.jobId),
+        message: scoutForm.message,
+        status: 'offered',
+        is_read: false
+      }))
+
+      const { error } = await supabase.from('scouts').insert(insertData)
+      if (error) throw error
+      
+      // 2. ★通知送信
+      // クエスト名を取得
+      const jobTitle = jobs.find(j => j.id.toString() === scoutForm.jobId)?.title || 'クエスト'
+
+      // 人数分ループして送信（Promise.allで並列処理）
+      await Promise.all(scoutForm.targetUserIds.map(userId => 
+        fetch('/api/admin/push', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            userId: userId,
+            title: 'スカウトが届きました！',
+            body: `特別オファー:「${jobTitle}」への参加依頼が届いています。`,
+            url: '/mypage?tab=quests'
+          })
+        }).catch(e => console.error(`Scout push failed for ${userId}`, e))
+      ))
+      
+      alert(`${count}件のスカウトを送信しました！(通知済み)`)
+      setScoutForm({ targetUserIds: [], targetUserNames: [], jobId: '', message: '' })
+      setSelectedUserIds(new Set()) 
+    } catch (e) {
+      if (e instanceof Error) alert('送信エラー: ' + e.message)
+    } finally {
+      setIsScoutSending(false)
+    }
+  }
+
+  const handleSendPush = async (userId: string, userName: string) => {
+  // 簡易的にpromptでタイトルと本文を入力
+    const title = prompt(`${userName} さんへの通知タイトルを入力してください`, 'しずおかコネクト');
+    if (title === null) return;
+
+    const body = prompt(`${userName} さんへの通知本文を入力してください`, '新着のお知らせがあります');
+    if (body === null) return;
+
+    try {
+      const res = await fetch('/api/admin/push', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ userId, title, body }) // ★内容を送信
+      })
+    
+      const data = await res.json()
+      if (data.success) {
+        alert(`${data.count} 件の端末に送信しました！`)
+      } else {
+        alert('送信失敗: ' + data.message)
+      }
+    } catch (e) {
+      console.error(e)
+      alert('通信エラーが発生しました')
+    }
+  }
+
+  const openChat = async (app: Applicant) => {
+    setActiveChatApplicant(app)
+    setChatMessages([])
+    const { data } = await supabase.from('application_messages').select('*').eq('application_id', app.id).order('created_at', { ascending: true }).returns<ChatMessage[]>()
+    setChatMessages(data || [])
+    setTimeout(() => messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' }), 100)
+  }
+
+  const handleAdminSendMessage = async (e: React.FormEvent) => {
+    e.preventDefault()
+    if (!chatInput.trim() || !activeChatApplicant) return
+    setIsChatSending(true)
+    try {
+      const { data: { user } } = await supabase.auth.getUser()
+      if (!user) throw new Error('Auth error')
+      
+      // ★以前の直接insert処理を削除し、API呼び出しに変更
+      const res = await fetch('/api/chat/send', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          ApplicationId: activeChatApplicant.id,
+          senderId: user.id,
+          content: chatInput.trim(),
+          isFromAdmin: true // 管理者フラグ
+        })
+      })
+
+      if (!res.ok) throw new Error('送信に失敗しました')
+
+      // 画面更新
+      const newMsg = { id: Date.now(), content: chatInput.trim(), sender_id: user.id, created_at: new Date().toISOString() }
+      setChatMessages(prev => [...prev, newMsg]); setChatInput('')
+      setTimeout(() => messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' }), 100)
+    } catch(e) { 
+      // eslint-disable-next-line @typescript-eslint/no-unused-vars
+      const _ = e
+      alert('送信エラー') 
+    } finally { setIsChatSending(false) }
+  }
+  
+  const handleLogout = async () => { await supabase.auth.signOut(); router.push('/login') }
+
+  if (loading) return <div className="min-h-screen flex items-center justify-center">Loading...</div>
+
+  return (
+    <div className="min-h-screen bg-slate-50 font-sans text-gray-900 flex flex-col">
+      <div className="print:hidden">
+        <header className="bg-slate-800 text-white shadow-md sticky top-0 z-30 px-4 sm:px-6 py-4 flex justify-between items-center">
+          <div className="flex items-center gap-2"><span className="text-xl">🛡️</span><h1 className="text-lg font-bold">管理者コンソール</h1></div>
+          <button onClick={handleLogout} className="text-xs bg-slate-700 hover:bg-slate-600 px-3 py-2 rounded">ログアウト</button>
+        </header>
+
+        <div className="flex flex-col md:flex-row flex-1 max-w-6xl mx-auto w-full p-4 gap-6 items-start">
+          <nav className="w-full md:w-64 bg-white rounded-xl shadow-sm border border-gray-200 overflow-x-auto md:overflow-visible flex md:flex-col shrink-0 sticky top-20 z-20">
+            <button onClick={() => setActiveView('job_list')} className={`text-left px-6 py-4 font-bold text-sm flex gap-3 whitespace-nowrap ${['job_list', 'job_detail'].includes(activeView) ? 'bg-blue-50 text-blue-600 md:border-l-4 md:border-b-0 border-b-4 border-blue-600' : 'text-gray-600 hover:bg-gray-50'}`}><span>📋</span> 求人管理</button>
+            <button onClick={() => setActiveView('create_job')} className={`text-left px-6 py-4 font-bold text-sm flex gap-3 whitespace-nowrap ${activeView === 'create_job' ? 'bg-blue-50 text-blue-600 md:border-l-4 md:border-b-0 border-b-4 border-blue-600' : 'text-gray-600 hover:bg-gray-50'}`}><span>✏️</span> 求人作成</button>
+            <button onClick={() => setActiveView('user_search')} className={`text-left px-6 py-4 font-bold text-sm flex gap-3 whitespace-nowrap ${activeView === 'user_search' ? 'bg-blue-50 text-blue-600 md:border-l-4 md:border-b-0 border-b-4 border-blue-600' : 'text-gray-600 hover:bg-gray-50'}`}><span>🔍</span> ユーザー・スカウト</button>
+            <button onClick={() => setActiveView('news_list')} className={`text-left px-6 py-4 font-bold text-sm flex gap-3 whitespace-nowrap ${['news_list', 'edit_news'].includes(activeView) ? 'bg-blue-50 text-blue-600 md:border-l-4 md:border-b-0 border-b-4 border-blue-600' : 'text-gray-600 hover:bg-gray-50'}`}><span>📢</span> お知らせ管理</button>
+            <button onClick={() => setActiveView('qr')} className={`text-left px-6 py-4 font-bold text-sm flex gap-3 whitespace-nowrap ${activeView === 'qr' ? 'bg-blue-50 text-blue-600 md:border-l-4 md:border-b-0 border-b-4 border-blue-600' : 'text-gray-600 hover:bg-gray-50'}`}><span>🎟️</span> QR発行</button>
+          </nav>
+
+          <main className="flex-1 bg-white rounded-xl shadow-sm border border-gray-200 min-h-[600px] p-4 sm:p-6 relative w-full overflow-hidden">
+            
+            {activeView === 'job_list' && (
+               <div className="animate-fade-in-up">
+                <h2 className="text-xl font-bold text-gray-800 mb-6">求人リスト</h2>
+                <div className="space-y-3">
+                  {jobs.map(job => {
+                    const isExpired = job.deadline && new Date(job.deadline) < new Date()
+                    return (
+                      <div key={job.id} onClick={() => handleJobClick(job)} className={`border p-4 rounded-xl cursor-pointer hover:shadow-md transition-all flex flex-col sm:flex-row justify-between sm:items-center gap-2 ${isExpired ? 'bg-gray-100 border-gray-200' : 'bg-white border-gray-200 hover:border-blue-300'}`}>
+                        <div>
+                          <div className="flex items-center gap-2 mb-1">
+                            {isExpired ? <span className="bg-gray-500 text-white text-[10px] px-2 py-0.5 rounded font-bold">期限切れ</span> : <span className="bg-green-500 text-white text-[10px] px-2 py-0.5 rounded font-bold">募集中</span>}
+                            <span className="text-xs text-gray-500 font-mono">{new Date(job.created_at).toLocaleDateString()} 作成</span>
+                          </div>
+                          <h3 className={`font-bold ${isExpired ? 'text-gray-500' : 'text-gray-800'}`}>{job.title}</h3>
+                          <p className="text-xs text-gray-500 mt-1">報酬: {job.reward_amount} / 条件: {job.required_rank}</p>
+                        </div>
+                        <span className="text-gray-400 text-sm text-right sm:text-left">詳細へ &rarr;</span>
+                      </div>
+                    )
+                  })}
+                </div>
+              </div>
+            )}
+
+            {activeView === 'job_detail' && selectedJob && (
+               <div className="animate-fade-in-up">
+                <button onClick={() => setActiveView('job_list')} className="mb-4 text-sm text-blue-600 hover:underline font-bold flex items-center gap-1">← 一覧に戻る</button>
+                <div className="bg-slate-50 p-6 rounded-xl border border-slate-200 mb-8 relative">
+                  <div className="absolute top-4 right-4"><button onClick={handleDeleteJob} className="text-xs bg-white text-red-600 border border-red-200 px-3 py-2 rounded hover:bg-red-50 font-bold shadow-sm">🗑️ 削除</button></div>
+                  <h2 className="text-2xl font-bold text-gray-800 mb-2 pr-16">{selectedJob.title}</h2>
+                  <div className="flex flex-wrap gap-3 text-sm text-gray-600 mb-4 font-mono">
+                    <span className="bg-white px-2 py-1 rounded border">💰 {selectedJob.reward_amount}</span>
+                    <span className="bg-white px-2 py-1 rounded border">🎓 {selectedJob.required_rank}以上</span>
+                    {selectedJob.required_badges && selectedJob.required_badges.length > 0 && (
+                      <span className="bg-white px-2 py-1 rounded border">🛡️ 必須バッジあり</span>
+                    )}
+                    {selectedJob.deadline && <span className="text-red-600 font-bold bg-white px-2 py-1 rounded border border-red-100">⏳ 期限: {new Date(selectedJob.deadline).toLocaleDateString()}</span>}
+                  </div>
+                  <p className="text-sm text-gray-700 whitespace-pre-wrap bg-white p-4 rounded border border-gray-200">{selectedJob.description}</p>
+                </div>
+                <h3 className="text-lg font-bold text-gray-800 mb-4 flex items-center gap-2"><span>👥</span> 応募者一覧 <span className="bg-blue-100 text-blue-800 text-xs px-2 py-0.5 rounded-full">{applicants.length}名</span></h3>
+                <div className="overflow-x-auto">
+                  <table className="w-full text-sm text-left text-gray-500 border-collapse min-w-[600px]">
+                    <thead className="text-xs text-gray-700 uppercase bg-gray-100 border-b"><tr><th className="px-4 py-3">ステータス</th><th className="px-4 py-3">応募者情報</th><th className="px-4 py-3 w-1/3">メッセージ</th><th className="px-4 py-3 text-right">アクション</th></tr></thead>
+                    <tbody>
+                      {applicants.map(app => (
+                        <tr key={app.id} className="bg-white border-b hover:bg-gray-50">
+                          <td className="px-4 py-4"><span className={`px-2 py-1 rounded text-xs font-bold text-white ${app.status === 'approved' ? 'bg-green-500' : app.status === 'rejected' ? 'bg-red-400' : 'bg-yellow-400'}`}>{app.status.toUpperCase()}</span></td>
+                          <td className="px-4 py-4"><div className="font-bold text-gray-900">{app.user.email}</div><div className="text-xs">Rank: {app.user.current_rank} / XP: {app.user.total_xp}</div></td>
+                          <td className="px-4 py-4 text-gray-600 italic">&quot;{app.message}&quot;</td>
+                          <td className="px-4 py-4 text-right">
+                            <div className="flex gap-2 justify-end items-center">
+                              <button onClick={() => openChat(app)} className="text-xs bg-slate-100 text-slate-600 px-3 py-1.5 rounded font-bold hover:bg-slate-200 flex items-center gap-1">💬 チャット</button>
+                              {app.status === 'pending' && (
+                                <>
+                                  <button onClick={() => updateStatus(app.id, 'rejected')} className="px-3 py-1.5 text-xs border border-red-200 text-red-600 rounded font-bold">不採用</button>
+                                  <button onClick={() => updateStatus(app.id, 'approved')} className="px-3 py-1.5 bg-blue-600 text-white rounded font-bold shadow-sm">採用</button>
+                                </>
+                              )}
+                            </div>
+                          </td>
+                        </tr>
+                      ))}
+                      {applicants.length === 0 && <tr><td colSpan={4} className="px-4 py-8 text-center text-gray-400">応募者はまだいません</td></tr>}
+                    </tbody>
+                  </table>
+                </div>
+              </div>
+            )}
+
+            {activeView === 'create_job' && (
+               <div className="animate-fade-in-up">
+                <h2 className="text-xl font-bold text-gray-800 mb-6">新規クエスト作成</h2>
+                <form onSubmit={handleCreateJob} className="space-y-5 max-w-lg">
+                  <div>
+                    <label className="block text-sm font-bold text-gray-700 mb-2">タイトル</label>
+                    <input type="text" required className="w-full p-3 border border-gray-300 rounded-lg" value={newJob.title} onChange={e => setNewJob({...newJob, title: e.target.value})} />
+                  </div>
+                  
+                  <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+                    <div>
+                      <label className="block text-sm font-bold text-gray-700 mb-2">報酬額 (円)</label>
+                      <div className="relative">
+                        <input 
+                          type="number" 
+                          required 
+                          placeholder="例: 5000" 
+                          className="w-full p-3 border border-gray-300 rounded-lg pr-8" 
+                          value={newJob.reward_val} 
+                          onChange={e => setNewJob({...newJob, reward_val: e.target.value})} 
+                        />
+                        <span className="absolute right-3 top-3 text-gray-500 font-bold">円</span>
+                      </div>
+                    </div>
+                    <div>
+                      <label className="block text-sm font-bold text-gray-700 mb-2">必須ランク</label>
+                      <select className="w-full p-3 border border-gray-300 rounded-lg" value={newJob.required_rank} onChange={e => setNewJob({...newJob, required_rank: e.target.value})}>
+                        <option value="ビギナー">ビギナー以上</option>
+                        <option value="ブロンズ">ブロンズ以上</option>
+                        <option value="シルバー">シルバー以上</option>
+                        <option value="ゴールド">ゴールド以上</option>
+                      </select>
+                    </div>
+                  </div>
+
+                  <div>
+                    <label className="block text-sm font-bold text-gray-700 mb-2">必須称号 (任意・複数選択可)</label>
+                    <div className="bg-gray-50 p-4 rounded-lg border border-gray-200 max-h-40 overflow-y-auto grid grid-cols-2 gap-2">
+                      {allBadges.map(badge => (
+                        <label key={badge.id} className="flex items-center gap-2 cursor-pointer p-1 hover:bg-gray-100 rounded">
+                          <input 
+                            type="checkbox" 
+                            className="w-4 h-4 text-blue-600 rounded" 
+                            checked={newJobBadges.includes(badge.id)} 
+                            onChange={() => toggleJobBadge(badge.id)} 
+                          />
+                          <span className="text-xl">{badge.icon_url}</span>
+                          <span className="text-xs text-gray-700">{badge.name}</span>
+                        </label>
+                      ))}
+                      {allBadges.length === 0 && <span className="text-xs text-gray-400">登録された称号がありません</span>}
+                    </div>
+                  </div>
+
+                  <div><label className="block text-sm font-bold text-gray-700 mb-2">募集期限 (任意)</label><input type="date" className="w-full p-3 border border-gray-300 rounded-lg" value={newJob.deadline} onChange={e => setNewJob({...newJob, deadline: e.target.value})} /></div>
+                  <div><label className="block text-sm font-bold text-gray-700 mb-2">詳細内容</label><textarea required rows={5} className="w-full p-3 border border-gray-300 rounded-lg" value={newJob.description} onChange={e => setNewJob({...newJob, description: e.target.value})}></textarea></div>
+                  <button type="submit" disabled={isJobSubmitting} className="w-full bg-blue-600 text-white font-bold py-4 rounded-xl shadow-lg hover:bg-blue-700 disabled:opacity-50">{isJobSubmitting ? '作成中...' : '公開する'}</button>
+                </form>
+              </div>
+            )}
+
+            {activeView === 'news_list' && (
+              <div className="animate-fade-in-up">
+                <div className="mb-8 border-b border-gray-100 pb-8">
+                  <h3 className="font-bold text-gray-700 mb-4 flex items-center gap-2">📡 監視対象の管理</h3>
+                  <div className="grid gap-3 mb-4">
+                    {sources.map(src => (
+                      <div key={src.id} className="flex items-center justify-between bg-gray-50 p-3 rounded-lg border border-gray-200 text-sm">
+                        <div className="overflow-hidden mr-2">
+                          <div className="font-bold text-gray-800">{src.name}</div>
+                          <div className="text-xs text-gray-400 font-mono truncate">{src.rss_url}</div>
+                        </div>
+                        <button onClick={() => handleDeleteSource(src.id)} className="text-red-500 text-xs border border-red-200 px-3 py-1.5 rounded hover:bg-red-50 font-bold shrink-0">解除</button>
+                      </div>
+                    ))}
+                  </div>
+                  <div className="bg-gray-50 p-4 rounded-xl border border-gray-200">
+                    <h4 className="text-xs font-bold text-gray-500 mb-3">新規追加</h4>
+                    <div className="flex flex-col gap-3">
+                      <div className="flex gap-2 flex-col sm:flex-row">
+                        <input className="flex-1 border border-gray-300 rounded-lg p-2 text-sm" placeholder="名称 (例: 公式ブログ)" value={newSource.name} onChange={e => setNewSource({...newSource, name: e.target.value})} />
+                        <input className="flex-[2] border border-gray-300 rounded-lg p-2 text-sm" placeholder="RSS URL" value={newSource.rss_url} onChange={e => setNewSource({...newSource, rss_url: e.target.value})} />
+                      </div>
+                      <div className="flex gap-2">
+                        <input className="flex-[3] border border-gray-300 rounded-lg p-2 text-sm" placeholder="Fallback URL (任意)" value={newSource.fallback_url} onChange={e => setNewSource({...newSource, fallback_url: e.target.value})} />
+                        <button onClick={handleAddSource} className="bg-slate-800 text-white px-6 py-2 rounded-lg text-sm font-bold hover:bg-slate-900 shadow-sm shrink-0">追加</button>
+                      </div>
+                    </div>
+                  </div>
+                </div>
+
+                <div className="flex justify-between items-center mb-6">
+                  <h2 className="text-xl font-bold text-gray-800">お知らせリスト</h2>
+                  <div className="flex gap-2">
+                     <button onClick={handleSyncNews} disabled={isSyncingNews} className="bg-green-600 text-white px-3 py-2 rounded-lg font-bold hover:bg-green-700 text-xs sm:text-sm flex items-center gap-1">{isSyncingNews ? '...' : '🔄 同期'}</button>
+                     <button onClick={openCreateNews} className="bg-blue-600 text-white px-3 py-2 rounded-lg font-bold hover:bg-blue-700 text-xs sm:text-sm">+ 新規</button>
+                  </div>
+                </div>
+                <div className="space-y-3">
+                  {newsList.map(news => (
+                    <div key={news.id} className="flex justify-between items-center bg-white p-4 rounded-xl shadow-sm border border-gray-100">
+                       <div className="flex-1 min-w-0">
+                          <div className="flex items-center gap-2 mb-1">
+                             <span className="text-[10px] font-bold bg-gray-100 text-gray-500 px-2 py-0.5 rounded shrink-0">{news.source_name}</span>
+                             <span className="text-xs text-gray-400 shrink-0">{new Date(news.published_at).toLocaleDateString()}</span>
+                          </div>
+                          <h3 className="font-bold text-gray-800 text-sm truncate">{news.title}</h3>
+                       </div>
+                       <div className="flex gap-2 ml-4 shrink-0">
+                          <button onClick={() => openEditNews(news)} className="p-2 text-gray-500 hover:bg-gray-100 rounded-lg text-xs font-bold border border-gray-200">編集</button>
+                          <button onClick={() => handleDeleteNews(news.id)} className="p-2 text-red-500 hover:bg-red-50 rounded-lg text-xs font-bold border border-red-100">削除</button>
+                       </div>
+                    </div>
+                  ))}
+                  {newsList.length === 0 && <div className="text-center p-8 text-gray-400 text-sm">お知らせはありません</div>}
+                </div>
+              </div>
+            )}
+
+            {activeView === 'edit_news' && (
+              <div className="animate-fade-in-up">
+                 <button onClick={() => setActiveView('news_list')} className="mb-4 text-sm text-blue-600 hover:underline font-bold">← リストに戻る</button>
+                 <h2 className="text-xl font-bold text-gray-800 mb-6">{editingNewsId ? '編集' : '新規作成'}</h2>
+                 <form onSubmit={handleSaveNews} className="space-y-4 max-w-md">
+                   <div><label className="block text-sm font-bold text-gray-700 mb-2">タイトル</label><input type="text" required className="w-full p-3 border border-gray-300 rounded-lg" value={newsForm.title} onChange={e => setNewsForm({...newsForm, title: e.target.value})} /></div>
+                   <div><label className="block text-sm font-bold text-gray-700 mb-2">発信元</label><input type="text" className="w-full p-3 border border-gray-300 rounded-lg" value={newsForm.source_name} onChange={e => setNewsForm({...newsForm, source_name: e.target.value})} /></div>
+                   <div><label className="block text-sm font-bold text-gray-700 mb-2">URL</label><input type="url" className="w-full p-3 border border-gray-300 rounded-lg" value={newsForm.link_url} onChange={e => setNewsForm({...newsForm, link_url: e.target.value})} /></div>
+                   <div><label className="block text-sm font-bold text-gray-700 mb-2">本文</label><textarea rows={6} className="w-full p-3 border border-gray-300 rounded-lg" value={newsForm.content} onChange={e => setNewsForm({...newsForm, content: e.target.value})} /></div>
+                   <button type="submit" disabled={isNewsSubmitting} className="w-full bg-blue-600 text-white font-bold py-3 rounded-xl hover:bg-blue-700 disabled:opacity-50 mt-4 shadow-md">{isNewsSubmitting ? '保存中...' : '保存'}</button>
+                 </form>
+              </div>
+            )}
+
+            {activeView === 'user_search' && (
+              <div className="animate-fade-in-up">
+                <h2 className="text-xl font-bold text-gray-800 mb-6">ユーザー検索・一斉スカウト</h2>
+                
+                <div className="bg-gray-50 p-4 rounded-xl border border-gray-200 mb-4 flex flex-col sm:flex-row gap-4 items-end sm:items-center justify-between">
+                  <div className="flex flex-col sm:flex-row gap-3 w-full sm:w-auto">
+                    <div>
+                      <label className="text-xs font-bold text-gray-500 block mb-1">ランクで絞り込み</label>
+                      <select className="p-2 border border-gray-300 rounded text-sm w-full sm:w-32" value={filterRank} onChange={e => setFilterRank(e.target.value)}>
+                        <option value="all">全て</option>
+                        <option value="ビギナー">ビギナー</option>
+                        <option value="ブロンズ">ブロンズ</option>
+                        <option value="シルバー">シルバー</option>
+                        <option value="ゴールド">ゴールド</option>
+                        <option value="プラチナ">プラチナ</option>
+                      </select>
+                    </div>
+                    <div>
+                      <label className="text-xs font-bold text-gray-500 block mb-1">保有バッジで絞り込み</label>
+                      <select className="p-2 border border-gray-300 rounded text-sm w-full sm:w-40" value={filterBadge} onChange={e => setFilterBadge(e.target.value === 'all' ? 'all' : Number(e.target.value))}>
+                        <option value="all">全て</option>
+                        {allBadges.map(b => <option key={b.id} value={b.id}>{b.name}</option>)}
+                      </select>
+                    </div>
+                  </div>
+                  
+                  <div className="w-full sm:w-auto flex gap-2 justify-end">
+                    {selectedUserIds.size > 0 && (
+                      <>
+                         <button onClick={clearSelection} className="text-gray-500 text-xs font-bold underline px-2">選択解除</button>
+                         <button onClick={() => openScoutModal(filteredUsers.filter(u => selectedUserIds.has(u.id)))} className="bg-indigo-600 text-white px-4 py-2 rounded-lg font-bold shadow-md hover:bg-indigo-700 text-sm animate-bounce-in">
+                           {selectedUserIds.size}人にスカウトを送る
+                         </button>
+                      </>
+                    )}
+                  </div>
+                </div>
+
+                <div className="overflow-x-auto bg-white rounded-xl border border-gray-200">
+                  <table className="w-full text-sm text-left min-w-[600px]">
+                    <thead className="text-xs text-gray-700 uppercase bg-gray-50 border-b">
+                      <tr>
+                        <th className="px-4 py-3 w-10">
+                          <input type="checkbox" onChange={(e) => e.target.checked ? selectAllFilteredUsers() : clearSelection()} checked={selectedUserIds.size > 0 && selectedUserIds.size === filteredUsers.length} />
+                        </th>
+                        <th className="px-6 py-3">ユーザー</th>
+                        <th className="px-6 py-3">ランク / XP</th>
+                        <th className="px-6 py-3">獲得バッジ</th>
+                        <th className="px-6 py-3 text-right">アクション</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {filteredUsers.map(user => (
+                        <tr key={user.id} className={`border-b hover:bg-gray-50 ${selectedUserIds.has(user.id) ? 'bg-indigo-50' : 'bg-white'}`}>
+                          <td className="px-4 py-4">
+                            <input type="checkbox" checked={selectedUserIds.has(user.id)} onChange={() => toggleUserSelection(user.id)} />
+                          </td>
+                          <td className="px-6 py-4 font-bold text-gray-800">
+                             {user.username || 'No Name'}
+                             <div className="text-[10px] font-normal text-gray-400">{user.email}</div>
+                          </td>
+                          <td className="px-6 py-4">
+                             <span className={`px-2 py-0.5 rounded text-[10px] font-bold border ${user.current_rank === 'プラチナ' ? 'bg-purple-100 text-purple-600 border-purple-200' : 'bg-gray-100 text-gray-600 border-gray-200'}`}>
+                               {user.current_rank}
+                             </span>
+                             <div className="text-xs text-gray-500 mt-1">{user.total_xp} XP</div>
+                          </td>
+                          <td className="px-6 py-4">
+                             <div className="flex flex-wrap gap-1">
+                                {user.user_badges && user.user_badges.length > 0 ? (
+                                  user.user_badges.map((ub, i) => (
+                                     ub.badge ? <span key={i} title={ub.badge.name} className="text-lg cursor-help">{ub.badge.icon_url}</span> : null
+                                  ))
+                                ) : <span className="text-xs text-gray-300">-</span>}
+                             </div>
+                          </td>
+
+                          <td className="px-6 py-4 text-right">
+                              {/* ★ flexコンテナを追加してボタンを横並びにする */}
+                              <div className="flex justify-end gap-2">
+      
+                               {/* ★追加する通知ボタン */}
+                              <button 
+                                onClick={() => handleSendPush(user.id, user.username || 'No Name')}
+                                className="bg-orange-500 text-white px-3 py-1.5 rounded text-xs font-bold hover:bg-orange-600 shadow-sm whitespace-nowrap"
+                              >
+                                🔔 通知
+                              </button>
+
+                              {/* 既存のスカウトボタン */}
+                              <button 
+                                onClick={() => openScoutModal([user])}
+                                className="bg-indigo-600 text-white px-3 py-1.5 rounded text-xs font-bold hover:bg-indigo-700 shadow-sm whitespace-nowrap"
+                              >
+                                個別スカウト
+                             </button>
+      
+                           </div>
+                         </td>
+                        </tr>
+                      ))}
+                      {filteredUsers.length === 0 && <tr><td colSpan={5} className="text-center py-8 text-gray-400">条件に合うユーザーがいません</td></tr>}
+                    </tbody>
+                  </table>
+                </div>
+              </div>
+            )}
+
+            {activeView === 'qr' && (
+              <div className="animate-fade-in-up">
+                <h2 className="text-xl font-bold text-gray-800 mb-6">イベントQR発行</h2>
+                <div className="bg-gray-50 p-6 rounded-xl border border-gray-200 mb-6">
+                  <select className="w-full p-3 border border-gray-300 rounded-lg mb-4" onChange={handleEventSelect} value={selectedEventId || ''}>
+                    <option value="">-- イベントを選択 --</option>
+                    {events.map(ev => <option key={ev.id} value={ev.id}>{ev.event_date} : {ev.title}</option>)}
+                  </select>
+                  <button onClick={generateNewQr} disabled={!selectedEventId || isQrProcessing} className="w-full py-3 bg-blue-600 text-white font-bold rounded-xl disabled:bg-gray-400">QRコードを発行</button>
+                </div>
+                {qrValue && (
+                  <div className="text-center">
+                    <div className="bg-white p-6 inline-block border-4 border-dashed border-gray-200 rounded-xl mb-4">
+                      <QRCodeSVG value={qrValue} size={300} />
+                    </div>
+                    <p className="text-xs text-gray-500 font-mono mb-4">{qrValue}</p>
+                    <button onClick={handlePrintQr} className="bg-gray-800 text-white px-6 py-2 rounded-full font-bold hover:bg-gray-900 shadow-lg flex items-center gap-2 mx-auto">
+                      <span>🖨️</span> QRコードを印刷する
+                    </button>
+                  </div>
+                )}
+              </div>
+            )}
+
+            {scoutForm.targetUserIds.length > 0 && (
+              <div className="fixed inset-0 bg-black/50 z-50 flex items-center justify-center p-4">
+                 <div className="bg-white rounded-xl shadow-2xl w-full max-w-md overflow-hidden animate-fade-in-up">
+                    <div className="bg-indigo-600 p-4 text-white font-bold flex justify-between">
+                       <span>スカウト送信</span>
+                       <button onClick={() => setScoutForm({ targetUserIds: [], targetUserNames: [], jobId: '', message: '' })}>✕</button>
+                    </div>
+                    <form onSubmit={handleSendScout} className="p-6 space-y-4">
+                       <div>
+                          <label className="block text-xs font-bold text-gray-500 mb-1">送信先</label>
+                          <div className="font-bold text-gray-800 text-sm max-h-20 overflow-y-auto border p-2 rounded bg-gray-50">
+                            {scoutForm.targetUserNames.join(', ')}
+                            <span className="text-gray-400 ml-1">({scoutForm.targetUserIds.length}名)</span>
+                          </div>
+                       </div>
+                       <div>
+                          <label className="block text-xs font-bold text-gray-500 mb-1">アサインしたい案件</label>
+                          <select 
+                             className="w-full p-2 border border-gray-300 rounded"
+                             value={scoutForm.jobId}
+                             onChange={e => setScoutForm({...scoutForm, jobId: e.target.value})}
+                             required
+                          >
+                             {jobs.map(job => (
+                                <option key={job.id} value={job.id}>{job.title}</option>
+                             ))}
+                          </select>
+                       </div>
+                       <div>
+                          <label className="block text-xs font-bold text-gray-500 mb-1">メッセージ (全員共通)</label>
+                          <textarea 
+                             className="w-full p-2 border border-gray-300 rounded h-32"
+                             value={scoutForm.message}
+                             onChange={e => setScoutForm({...scoutForm, message: e.target.value})}
+                             required
+                          ></textarea>
+                       </div>
+                       <button 
+                          type="submit" 
+                          disabled={isScoutSending}
+                          className="w-full bg-indigo-600 text-white py-3 rounded font-bold hover:bg-indigo-700 disabled:opacity-50"
+                       >
+                          {isScoutSending ? '送信中...' : 'オファーを確定する'}
+                       </button>
+                    </form>
+                 </div>
+              </div>
+            )}
+
+            {activeChatApplicant && (
+              <div className="fixed inset-0 bg-black/50 z-50 flex items-center justify-center p-4">
+                 <div className="bg-white w-full max-w-lg h-[80vh] rounded-xl shadow-2xl flex flex-col overflow-hidden animate-fade-in-up">
+                    <div className="bg-slate-800 text-white px-4 py-3 flex justify-between items-center">
+                       <div><span className="text-xs font-bold text-slate-400">対話相手:</span> {activeChatApplicant.user.email}</div>
+                       <button onClick={() => setActiveChatApplicant(null)}>✕</button>
+                    </div>
+                    <div className="flex-1 overflow-y-auto p-4 space-y-4 bg-slate-50">
+                       {chatMessages.map(msg => {
+                         const isAdmin = msg.sender_id !== activeChatApplicant.user_id
+                         return (
+                           <div key={msg.id} className={`flex ${isAdmin ? 'justify-end' : 'justify-start'}`}>
+                              <div className={`p-3 rounded-xl max-w-[80%] text-sm ${isAdmin ? 'bg-blue-600 text-white rounded-tr-none' : 'bg-white border border-gray-200 rounded-tl-none'}`}>
+                                <p className="whitespace-pre-wrap">{msg.content}</p>
+                                <div className={`text-[10px] text-right mt-1 ${isAdmin ? 'text-blue-200' : 'text-gray-400'}`}>{new Date(msg.created_at).toLocaleTimeString([], {hour: '2-digit', minute:'2-digit'})}</div>
+                              </div>
+                           </div>
+                         )
+                       })}
+                       <div ref={messagesEndRef} />
+                    </div>
+                    <form onSubmit={handleAdminSendMessage} className="p-3 bg-white border-t flex gap-2">
+                       <input className="flex-1 bg-gray-100 border-0 rounded-full px-4 py-2 focus:ring-2 focus:ring-blue-500 focus:outline-none" value={chatInput} onChange={e => setChatInput(e.target.value)} placeholder="管理者として返信..." />
+                       <button type="submit" disabled={isChatSending} className="bg-blue-600 text-white px-4 py-2 rounded-full font-bold hover:bg-blue-700 disabled:opacity-50">送信</button>
+                    </form>
+                 </div>
+              </div>
+            )}
+
+          </main>
+        </div>
+      </div>
+
+      <div className="hidden print:flex print:flex-col print:items-center print:justify-center print:min-h-screen p-10 text-center">
+        <h1 className="text-3xl font-bold mb-4">{events.find(e => e.id === selectedEventId)?.title}</h1>
+        <p className="text-xl mb-8">チェックイン用QRコード</p>
+        <div className="border-4 border-black p-4 inline-block mb-8">
+           {qrValue && <QRCodeSVG value={qrValue} size={500} />}
+        </div>
+        <p className="text-sm text-gray-500">しずおかコネクト - イベントチェックイン</p>
+      </div>
+    </div>
   )
 }
 </file>

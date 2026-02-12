@@ -30,7 +30,8 @@ export async function POST(request: Request) {
         .single()
       
       if (appData) {
-        // @ts-ignore
+        // eslint-disable-next-line @typescript-eslint/ban-ts-comment
+        // @ts-expect-error
         const jobTitle = appData.job?.title || 'クエスト'
         await sendPushNotification(
           appData.user_id,
@@ -41,7 +42,8 @@ export async function POST(request: Request) {
     }
 
     return NextResponse.json({ success: true })
-  } catch (err: any) {
-    return NextResponse.json({ success: false, error: err.message }, { status: 500 })
+  } catch (err: unknown) {
+    const errorMessage = err instanceof Error ? err.message : 'Unknown error'
+    return NextResponse.json({ success: false, error: errorMessage }, { status: 500 })
   }
 }

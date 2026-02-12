@@ -29,7 +29,6 @@ export async function POST(request: Request) {
     console.log(`Broadcasting to ${uniqueUserIds.length} users...`)
 
     // 2. ループして全員に送信
-    // (人数が多い場合は時間がかかるため、本来はバックグラウンドジョブが望ましいですが、一旦ループで処理)
     let successCount = 0
     
     // 並列処理で高速化
@@ -44,8 +43,9 @@ export async function POST(request: Request) {
     console.log(`Broadcast Complete. Success count: ${successCount}`)
     return NextResponse.json({ success: true, count: successCount })
 
-  } catch (err: any) {
+  } catch (err: unknown) {
     console.error("Broadcast Error:", err)
-    return NextResponse.json({ success: false, error: err.message }, { status: 500 })
+    const errorMessage = err instanceof Error ? err.message : 'Unknown error'
+    return NextResponse.json({ success: false, error: errorMessage }, { status: 500 })
   }
 }
