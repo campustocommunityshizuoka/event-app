@@ -20,7 +20,6 @@ function getPkcs8Der(privateKeyBase64: string, publicKeyBase64: string): Uint8Ar
   return der
 }
 
-// ★修正: ここにあった不要な eslint-disable を削除
 async function signVapidKey(endpoint: string) {
   const privateKey = process.env.VAPID_PRIVATE_KEY!
   const publicKey = process.env.NEXT_PUBLIC_VAPID_PUBLIC_KEY!
@@ -40,7 +39,7 @@ async function signVapidKey(endpoint: string) {
   const pkcs8 = getPkcs8Der(privateKey, publicKey)
   const cryptoKey = await crypto.subtle.importKey(
     'pkcs8',
-    pkcs8,
+    pkcs8 as any, // ★修正: 環境による型定義の不整合(ArrayBufferLike vs ArrayBuffer)を回避するため any でキャスト
     { name: 'ECDSA', namedCurve: 'P-256' },
     false,
     ['sign']
