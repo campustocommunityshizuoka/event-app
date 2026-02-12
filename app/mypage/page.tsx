@@ -1,7 +1,7 @@
 // app/mypage/page.tsx
 'use client'
 
-import { useEffect, useState } from 'react'
+import { useEffect, useState, Suspense } from 'react'
 import { supabase } from '@/app/lib/supabaseClient'
 import { useRouter, useSearchParams } from 'next/navigation'
 import AdminView from '@/app/components/mypage/AdminView'
@@ -13,7 +13,8 @@ const ADMIN_EMAILS = [
   'campustocommunityshizuoka@gmail.com'
 ]
 
-export default function MyPage() {
+// useSearchParamsを使うメインの処理を別コンポーネントに切り出し
+function MyPageContent() {
   const router = useRouter()
   const searchParams = useSearchParams()
   const viewParam = searchParams ? searchParams.get('view') : null
@@ -62,4 +63,17 @@ export default function MyPage() {
 
   // それ以外（一般ユーザー、または管理者がユーザービューを見たい場合）
   return <UserView userId={sessionUser.id} userEmail={sessionUser.email} />
+}
+
+// エクスポートするコンポーネントで Suspense バウンダリを設定
+export default function MyPage() {
+  return (
+    <Suspense fallback={
+      <div className="min-h-screen flex items-center justify-center bg-gray-50">
+        <div className="animate-pulse w-10 h-10 border-4 border-gray-200 border-t-blue-600 rounded-full animate-spin"></div>
+      </div>
+    }>
+      <MyPageContent />
+    </Suspense>
+  )
 }
