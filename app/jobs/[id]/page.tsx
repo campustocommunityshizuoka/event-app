@@ -1,6 +1,8 @@
 // app/jobs/[id]/page.tsx
 'use client'
 
+export const runtime = 'edge'
+
 import { useEffect, useState, use } from 'react'
 import { supabase } from '@/app/lib/supabaseClient'
 import { useRouter } from 'next/navigation'
