@@ -13,11 +13,14 @@
     "@supabase/ssr": "^0.8.0",
     "@supabase/supabase-js": "^2.87.1",
     "@yudiel/react-qr-scanner": "^2.4.1",
+    "browser-image-compression": "^2.0.2",
+    "cheerio": "^1.2.0",
     "next": "^15.0.3",
     "qrcode.react": "^4.2.0",
     "react": "^18.3.1",
     "react-dom": "^18.3.1",
-    "react-qr-code": "^2.0.18"
+    "react-qr-code": "^2.0.18",
+    "rss-parser": "^3.13.0"
   },
   "devDependencies": {
     "@cloudflare/next-on-pages": "^1.13.16",
