@@ -117,9 +117,10 @@ export default function EditProfilePage() {
       alert('プロフィールを更新しました！')
       router.push('/mypage') // マイページへ戻る
 
-    } catch (error: any) {
+    } catch (error: unknown) {
       console.error(error)
-      alert('更新に失敗しました: ' + error.message)
+      const errMsg = error instanceof Error ? error.message : '予期せぬエラー'
+      alert('更新に失敗しました: ' + errMsg)
     } finally {
       setSaving(false)
     }

@@ -121,9 +121,10 @@ export default function JobDetailPage({ params }: { params: Promise<{ id: string
       alert('応募が完了しました！\nクライアントからの連絡をお待ちください。')
       router.push('/mypage') // マイページへ戻る
       
-    } catch (err: any) {
+    } catch (err: unknown) {
       console.error(err)
-      alert('エラーが発生しました: ' + err.message)
+      const errMsg = err instanceof Error ? err.message : '予期せぬエラーが発生しました'
+      alert('エラーが発生しました: ' + errMsg)
     } finally {
       setSubmitting(false)
     }
