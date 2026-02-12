@@ -39,7 +39,8 @@ async function signVapidKey(endpoint: string) {
   const pkcs8 = getPkcs8Der(privateKey, publicKey)
   const cryptoKey = await crypto.subtle.importKey(
     'pkcs8',
-    pkcs8 as any, // ★修正: 環境による型定義の不整合(ArrayBufferLike vs ArrayBuffer)を回避するため any でキャスト
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    pkcs8 as any, 
     { name: 'ECDSA', namedCurve: 'P-256' },
     false,
     ['sign']
