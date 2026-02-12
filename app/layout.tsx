@@ -13,13 +13,21 @@ const geistMono = Geist_Mono({
 });
 
 export const metadata: Metadata = {
-  title: "しずおかコネクト～イベント参加管理アプリ～",
-  description: "イベント参加をもっとスマートに。しずおかコネクト公式チェックインアプリ。",
+  title: "しずおかコネクト",
+  description: "イベント参加管理アプリ",
+  manifest: "/manifest.json", // これを追加
+  appleWebApp: {
+    capable: true,
+    statusBarStyle: "default",
+    title: "しずおかコネクト",
+  },
   icons: {
-    icon: '/logo.png', // publicフォルダにあるロゴ画像をアイコンとして使用
-    apple: '/logo.png', // iPhoneのホーム画面に追加した時のアイコン
+    icon: '/logo.png',
+    apple: '/logo.png',
   },
 };
+
+// ... 既存のRootLayout
 
 export default function RootLayout({
   children,
@@ -36,3 +44,5 @@ export default function RootLayout({
     </html>
   );
 }
+
+

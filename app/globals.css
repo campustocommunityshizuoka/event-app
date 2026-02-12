@@ -24,3 +24,17 @@ body {
   color: var(--foreground);
   font-family: Arial, Helvetica, sans-serif;
 }
+
+/* app/globals.css */
+body {
+  /* 画面全体のスクロールバウンスを抑制（ネイティブアプリ感） */
+  overscroll-behavior-y: none; 
+  /* 文字選択を禁止（UIパーツを長押しした時に青くならないようにする） */
+  user-select: none;
+  -webkit-touch-callout: none;
+}
+
+input, textarea {
+  /* 入力欄だけは文字選択を許可 */
+  user-select: text;
+}
