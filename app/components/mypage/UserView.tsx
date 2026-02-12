@@ -1,4 +1,3 @@
-// app/components/mypage/UserView.tsx
 'use client'
 
 import { useEffect, useState, useRef } from 'react'
@@ -6,8 +5,6 @@ import { supabase } from '@/app/lib/supabaseClient'
 import { eventSupabase } from '@/app/lib/eventDbClient'
 import { useRouter } from 'next/navigation'
 import Link from 'next/link'
-
-// --- 厳密な型定義 ---
 
 const EXTERNAL_SITE_URL = 'https://hamamtsu-events.shizuoka-connect.com'
 
@@ -170,11 +167,9 @@ export default function UserView({ userId, userEmail }: { userId: string, userEm
   const [scouts, setScouts] = useState<Scout[]>([]) 
   const [news, setNews] = useState<NewsFeed[]>([])
   
-  // モーダル用
   const [selectedNews, setSelectedNews] = useState<NewsFeed | null>(null)
   const [selectedBadge, setSelectedBadge] = useState<Badge | null>(null)
   
-  // チャット用ステート
   const [activeChatApp, setActiveChatApp] = useState<MyApplication | null>(null)
   const [chatMessages, setChatMessages] = useState<ChatMessage[]>([])
   const [chatInput, setChatInput] = useState('')
@@ -187,21 +182,17 @@ export default function UserView({ userId, userEmail }: { userId: string, userEm
   const [nextRank, setNextRank] = useState<Rank>(RANKS[1])
   const [progressPercent, setProgressPercent] = useState(0)
 
-  // 非表示にしたアプリケーションIDリスト (Local Storage)
   const [hiddenAppIds, setHiddenAppIds] = useState<number[]>([])
 
   useEffect(() => {
     const init = async () => {
-      // Local Storageから非表示設定を読み込み
       const storedHidden = localStorage.getItem('hidden_quest_results')
       if (storedHidden) {
         setHiddenAppIds(JSON.parse(storedHidden))
       }
 
-      // 1. プロフィール
       let { data: profileData } = await supabase.from('profiles').select('*').eq('id', userId).single()
       
-      // 2. 参加履歴 & ランク計算
       const { data: participations } = await supabase.from('participations').select('event_id, checked_in_at').eq('user_id', userId).order('checked_in_at', { ascending: false })
 
       const participationCount = participations?.length || 0
@@ -230,11 +221,9 @@ export default function UserView({ userId, userEmail }: { userId: string, userEm
       const percent = range > 0 ? Math.min(100, Math.max(0, (currentProgress / range) * 100)) : 100
       setProgressPercent(percent)
 
-      // 3. バッジ
       const { data: userBadges } = await supabase.from('user_badges').select('badge:badges(*)').eq('user_id', userId).returns<UserBadgeResponse[]>()
       setBadges((userBadges || []).map(ub => ub.badge).filter((b): b is Badge => b !== null))
 
-      // 4. 応募
       const { data: appData } = await supabase.from('job_applications').select(`id, status, message, job:jobs ( id, title, reward_amount, required_rank )`).eq('user_id', userId).order('created_at', { ascending: false }).returns<JobApplicationDBResponse[]>()
       const formattedApps: MyApplication[] = (appData || []).map((app) => ({
         id: app.id,
@@ -245,7 +234,6 @@ export default function UserView({ userId, userEmail }: { userId: string, userEm
       setMyApplications(formattedApps)
       const appliedJobIds = formattedApps.map(app => app.job.id)
 
-      // 5. スカウト
       const { data: scoutData } = await supabase
         .from('scouts')
         .select('id, message, status, job:jobs (id, title, reward_amount)')
@@ -255,13 +243,11 @@ export default function UserView({ userId, userEmail }: { userId: string, userEm
         .returns<Scout[]>()
       setScouts(scoutData || [])
 
-      // 6. 仕事
       const now = new Date()
       const { data: jobData } = await supabase.from('jobs').select('*').eq('is_active', true).limit(50).returns<Job[]>()
       const validJobs = (jobData || []).filter(job => { if (!job.deadline) return true; return new Date(job.deadline) > now })
       setJobs(validJobs.filter(job => !appliedJobIds.includes(job.id)))
 
-      // 7. 履歴詳細
       if (participations) {
         const typedParticipations = participations as ParticipationResponse[]
         const eventIds = Array.from(new Set(typedParticipations.map(p => p.event_id)))
@@ -272,11 +258,9 @@ export default function UserView({ userId, userEmail }: { userId: string, userEm
         }))
       }
 
-      // 8. ニュース
       const { data: newsData } = await supabase.from('news_feeds').select('*').order('published_at', { ascending: false }).limit(20).returns<NewsFeed[]>()
       setNews(newsData || [])
 
-      // 9. 今後のイベント
       const todayStr = new Date().toISOString().split('T')[0]
       const { data: eventsData } = await eventSupabase
         .from('events')
@@ -300,7 +284,6 @@ export default function UserView({ userId, userEmail }: { userId: string, userEm
     init()
   }, [userId, userEmail])
 
-  // --- チャット・スカウト関連処理 ---
   const openChat = async (app: MyApplication) => {
     setActiveChatApp(app)
     setChatMessages([])
@@ -322,7 +305,11 @@ export default function UserView({ userId, userEmail }: { userId: string, userEm
       setChatMessages(prev => [...prev, newMsg])
       setChatInput('')
       setTimeout(scrollToBottom, 100)
-    } catch (err) { alert('送信に失敗しました') } finally { setIsSending(false) }
+    } catch (err) {
+      // eslint-disable-next-line @typescript-eslint/no-unused-vars
+      const _ = err 
+      alert('送信に失敗しました') 
+    } finally { setIsSending(false) }
   }
 
   const handleAcceptScout = async (scout: Scout) => {
@@ -331,7 +318,11 @@ export default function UserView({ userId, userEmail }: { userId: string, userEm
       await supabase.from('scouts').update({ status: 'accepted' }).eq('id', scout.id)
       await supabase.from('job_applications').insert({ job_id: scout.job.id, user_id: userId, message: 'スカウト経由の応募 (自動承認)', status: 'approved' })
       alert('オファーを受けました！'); window.location.reload()
-    } catch (e) { alert('エラーが発生しました') }
+    } catch (e) { 
+      // eslint-disable-next-line @typescript-eslint/no-unused-vars
+      const _ = e
+      alert('エラーが発生しました') 
+    }
   }
 
   const handleDeclineScout = async (scoutId: number) => {
@@ -340,7 +331,6 @@ export default function UserView({ userId, userEmail }: { userId: string, userEm
     setScouts(prev => prev.filter(s => s.id !== scoutId))
   }
 
-  // クエスト結果をホームから非表示にする
   const handleHideApp = (appId: number, e: React.MouseEvent) => {
     e.stopPropagation()
     const newHidden = [...hiddenAppIds, appId]
@@ -355,7 +345,6 @@ export default function UserView({ userId, userEmail }: { userId: string, userEm
   const approvedApps = myApplications.filter(a => a.status === 'approved' || a.status === 'rejected')
   const pendingApps = myApplications.filter(a => a.status === 'pending')
 
-  // --- コンポーネント: ニュースカルーセル (3件ずつ表示) ---
   const NewsCarousel = ({ newsItems }: { newsItems: NewsFeed[] }) => {
     const [pageIndex, setPageIndex] = useState(0)
     const ITEMS_PER_PAGE = 3
@@ -412,21 +401,16 @@ export default function UserView({ userId, userEmail }: { userId: string, userEm
     )
   }
 
-  // --- コンポーネント: クエスト・スカウト状況 ---
   const QuestDashboard = ({ isHome = false }: { isHome?: boolean }) => {
-    // ホーム画面の場合のみ、非表示設定を適用
     const visibleApprovedApps = isHome 
       ? approvedApps.filter(app => !hiddenAppIds.includes(app.id))
       : approvedApps
 
     if (scouts.length === 0 && myApplications.length === 0) return null
-
-    // すべて非表示で、かつ表示するものがなければnull (ホーム画面用)
     if (isHome && scouts.length === 0 && pendingApps.length === 0 && visibleApprovedApps.length === 0) return null
 
     return (
       <div className="mb-6 space-y-3">
-        {/* 1. スカウト (最優先) */}
         {scouts.map(scout => (
           <div key={scout.id} className="bg-gradient-to-r from-yellow-50 to-orange-50 border border-orange-200 p-4 rounded-xl shadow-sm relative overflow-hidden">
              <div className="absolute top-0 right-0 bg-orange-400 text-white text-[10px] font-bold px-2 py-0.5 rounded-bl-lg">オファー</div>
@@ -434,7 +418,7 @@ export default function UserView({ userId, userEmail }: { userId: string, userEm
                <span className="text-lg">💌</span>
                {scout.job.title}
              </h3>
-             <p className="text-xs text-gray-600 mb-3 line-clamp-2">"{scout.message}"</p>
+             <p className="text-xs text-gray-600 mb-3 line-clamp-2">&quot;{scout.message}&quot;</p>
              <div className="flex gap-2">
                 <button onClick={() => handleDeclineScout(scout.id)} className="flex-1 bg-white border border-gray-200 text-gray-500 text-xs font-bold py-2 rounded-lg">辞退</button>
                 <button onClick={() => handleAcceptScout(scout)} className="flex-[2] bg-orange-500 text-white text-xs font-bold py-2 rounded-lg shadow-sm">受ける (+{scout.job.reward_amount})</button>
@@ -442,7 +426,6 @@ export default function UserView({ userId, userEmail }: { userId: string, userEm
           </div>
         ))}
 
-        {/* 2. 審査中 (Pending) */}
         {pendingApps.length > 0 && (
            <div className="bg-white border border-blue-100 rounded-xl overflow-hidden shadow-sm">
               <div className="bg-blue-50 px-3 py-1.5 text-xs font-bold text-blue-700">審査中のクエスト</div>
@@ -460,7 +443,6 @@ export default function UserView({ userId, userEmail }: { userId: string, userEm
            </div>
         )}
 
-        {/* 3. 結果確定 (Approved/Rejected) */}
         {visibleApprovedApps.length > 0 && (
            <div className="bg-white border border-gray-200 rounded-xl overflow-hidden shadow-sm">
               <div className="bg-gray-50 px-3 py-1.5 text-xs font-bold text-gray-500">終了・結果確定</div>
@@ -476,7 +458,6 @@ export default function UserView({ userId, userEmail }: { userId: string, userEm
                           {app.status === 'approved' ? '採用 🎉' : '不採用'}
                        </span>
                        
-                       {/* ホーム画面の場合のみ削除ボタンを表示 */}
                        {isHome && (
                          <button 
                            onClick={(e) => handleHideApp(app.id, e)}
@@ -527,8 +508,6 @@ export default function UserView({ userId, userEmail }: { userId: string, userEm
 
   return (
     <div className="min-h-[100dvh] bg-gray-50 font-sans text-gray-900 pb-24">
-      
-      {/* ニュース詳細モーダル */}
       {selectedNews && (
         <div className="fixed inset-0 z-[100] flex items-center justify-center p-4 bg-black/60 backdrop-blur-sm animate-fade-in" onClick={() => setSelectedNews(null)}>
           <div className="bg-white rounded-2xl w-full max-w-lg overflow-hidden shadow-2xl animate-fade-in-up" onClick={e => e.stopPropagation()}>
@@ -545,7 +524,6 @@ export default function UserView({ userId, userEmail }: { userId: string, userEm
         </div>
       )}
 
-      {/* バッジ詳細モーダル */}
       {selectedBadge && (
         <div className="fixed inset-0 z-[100] flex items-center justify-center p-4 bg-black/60 backdrop-blur-sm animate-fade-in" onClick={() => setSelectedBadge(null)}>
           <div className="bg-white rounded-2xl w-full max-w-sm overflow-hidden shadow-2xl animate-fade-in-up text-center p-6" onClick={e => e.stopPropagation()}>
@@ -557,11 +535,9 @@ export default function UserView({ userId, userEmail }: { userId: string, userEm
         </div>
       )}
 
-      {/* チャットモーダル */}
       {activeChatApp && (
         <div className="fixed inset-0 z-[100] flex items-center justify-center p-0 sm:p-4 bg-black/60 backdrop-blur-sm animate-fade-in">
            <div className="bg-gray-100 w-full h-full sm:h-[80vh] sm:max-w-lg sm:rounded-2xl shadow-2xl flex flex-col overflow-hidden animate-fade-in-up">
-              {/* Header */}
               <div className="bg-white px-4 py-3 flex justify-between items-center shadow-sm z-10">
                  <div>
                     <span className={`text-[10px] font-bold px-2 py-0.5 rounded ${activeChatApp.status === 'approved' ? 'bg-green-100 text-green-700' : 'bg-yellow-100 text-yellow-700'}`}>
@@ -572,7 +548,6 @@ export default function UserView({ userId, userEmail }: { userId: string, userEm
                  <button onClick={closeChat} className="p-2 bg-gray-100 rounded-full hover:bg-gray-200"><Icons.Close /></button>
               </div>
               
-              {/* Messages Body */}
               <div className="flex-1 overflow-y-auto p-4 space-y-4">
                  <div className="text-center text-xs text-gray-400 my-4">- メッセージ履歴 -</div>
                  <div className="flex justify-end">
@@ -598,7 +573,6 @@ export default function UserView({ userId, userEmail }: { userId: string, userEm
                  <div ref={messagesEndRef} />
               </div>
 
-              {/* Input Footer */}
               <form onSubmit={handleSendMessage} className="bg-white p-3 border-t border-gray-200 flex gap-2">
                  <input type="text" className="flex-1 bg-gray-100 border-0 rounded-full px-4 py-2 focus:ring-2 focus:ring-blue-500 focus:outline-none" placeholder="メッセージを入力..." value={chatInput} onChange={e => setChatInput(e.target.value)} />
                  <button type="submit" disabled={isSending || !chatInput.trim()} className="bg-blue-600 text-white p-2 rounded-full hover:bg-blue-700 disabled:opacity-50 transition-colors w-10 h-10 flex items-center justify-center"><Icons.Send /></button>
@@ -607,7 +581,6 @@ export default function UserView({ userId, userEmail }: { userId: string, userEm
         </div>
       )}
 
-      {/* ヘッダー */}
       <header className="bg-white/90 backdrop-blur-md sticky top-0 z-20 px-5 py-3 flex justify-between items-center border-b border-gray-100 shadow-sm">
         <div className="flex items-center gap-2">
            {/* eslint-disable-next-line @next/next/no-img-element */}
@@ -622,11 +595,9 @@ export default function UserView({ userId, userEmail }: { userId: string, userEm
 
       <main className="max-w-md mx-auto p-4 space-y-6">
         
-        {/* ホーム */}
         {activeTab === 'home' && profile && (
           <div className="animate-fade-in-up">
             
-            {/* プロフィールカード (バッジ含む) */}
             <div className={`relative overflow-hidden rounded-2xl shadow-xl ${currentRankObj.color} p-6 text-white mb-6`}>
               <div className="absolute -top-10 -right-10 w-40 h-40 bg-white opacity-10 rounded-full blur-3xl"></div>
               <div className="absolute bottom-0 left-0 w-full h-1/2 bg-gradient-to-t from-black/20 to-transparent"></div>
@@ -661,7 +632,6 @@ export default function UserView({ userId, userEmail }: { userId: string, userEm
                 <p className="text-[10px] text-right mt-1 opacity-70">あと {nextRank.minXp - profile.total_xp} XPでランクアップ！</p>
               </div>
 
-              {/* バッジ表示エリア (カード内) */}
               <div className="relative z-10 border-t border-white/20 pt-3">
                  <div className="flex items-center gap-2 mb-2">
                     <span className="text-xs font-bold opacity-80">🏆 獲得した称号</span>
@@ -683,13 +653,10 @@ export default function UserView({ userId, userEmail }: { userId: string, userEm
               </div>
             </div>
 
-            {/* ニュースカルーセル */}
             <NewsCarousel newsItems={news} />
 
-            {/* クエスト状況ダッシュボード (ニュースの下) - ホームモード */}
             <QuestDashboard isHome={true} />
 
-            {/* 開催予定のイベント */}
             <section>
                <div className="flex items-center justify-between mb-3 px-1"><h3 className="font-bold text-gray-700 flex items-center gap-2"><span>📅</span> 開催予定のイベント</h3><button onClick={() => setActiveTab('events')} className="text-xs text-blue-600 font-bold hover:underline">すべて見る</button></div>
                {upcomingEvents.length === 0 ? (<div className="p-8 text-center text-gray-400 bg-white rounded-xl border border-dashed border-gray-200 text-xs">現在予定されているイベントはありません</div>) : (<EventGrid events={upcomingEvents} showMore={hasMoreEvents} />)}
@@ -697,7 +664,6 @@ export default function UserView({ userId, userEmail }: { userId: string, userEm
           </div>
         )}
 
-        {/* イベントタブ */}
         {activeTab === 'events' && (
           <div className="animate-fade-in-up">
             <h2 className="text-xl font-bold text-gray-800 mb-4 px-1">イベントを探す</h2>
@@ -706,10 +672,9 @@ export default function UserView({ userId, userEmail }: { userId: string, userEm
           </div>
         )}
 
-        {/* クエストタブ */}
         {activeTab === 'quests' && (
           <div className="animate-fade-in-up space-y-8">
-             <QuestDashboard isHome={false} /> {/* クエストタブでは全て表示（削除不可） */}
+             <QuestDashboard isHome={false} /> 
              <section>
               <h2 className="text-lg font-bold text-gray-800 mb-3 px-1 flex items-center gap-2"><span>⚔️</span> クエストボード (新規募集)</h2>
               {jobs.length === 0 ? (
@@ -738,7 +703,6 @@ export default function UserView({ userId, userEmail }: { userId: string, userEm
           </div>
         )}
 
-        {/* メッセージタブ */}
         {activeTab === 'messages' && (
           <div className="animate-fade-in-up">
             <h2 className="text-xl font-bold text-gray-800 mb-4 px-1">メッセージ</h2>
@@ -766,7 +730,6 @@ export default function UserView({ userId, userEmail }: { userId: string, userEm
           </div>
         )}
 
-        {/* インフォタブ */}
         {activeTab === 'info' && (
           <div className="animate-fade-in-up">
             <h2 className="text-xl font-bold text-gray-800 mb-4 px-1">お知らせ・情報</h2>
@@ -776,7 +739,6 @@ export default function UserView({ userId, userEmail }: { userId: string, userEm
           </div>
         )}
 
-        {/* 履歴タブ */}
         {activeTab === 'history' && (
           <div className="animate-fade-in-up">
             <h2 className="text-xl font-bold text-gray-800 mb-4 px-1">冒険の記録</h2>
@@ -787,7 +749,6 @@ export default function UserView({ userId, userEmail }: { userId: string, userEm
         )}
       </main>
 
-      {/* ナビゲーションバー */}
       <nav className="fixed bottom-0 left-0 z-50 w-full border-t border-gray-100 bg-white/90 backdrop-blur-md pb-safe pt-2">
         <div className="mx-auto flex h-16 max-w-md items-center justify-around px-2">
           <button onClick={() => setActiveTab('home')} className={`flex flex-1 flex-col items-center gap-1 ${activeTab === 'home' ? 'text-blue-600' : 'text-gray-400 hover:text-gray-600'}`}><Icons.Home /><span className="text-[10px] font-bold">ホーム</span></button>

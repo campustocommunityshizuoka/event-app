@@ -1,4 +1,3 @@
-// app/components/mypage/AdminView.tsx
 'use client'
 
 import { useEffect, useState, useRef } from 'react'
@@ -34,7 +33,7 @@ type Job = {
   description: string
   reward_amount: string
   required_rank: string
-  required_badges: number[] | null // 追加: 必須バッジID
+  required_badges: number[] | null
   deadline: string | null
   created_at: string
 }
@@ -88,9 +87,8 @@ type NewsFormState = {
 }
 
 type ScoutFormState = {
-  // 複数送信に対応するため、IDリストで管理
   targetUserIds: string[]
-  targetUserNames: string[] // 表示用
+  targetUserNames: string[]
   jobId: string
   message: string
 }
@@ -106,34 +104,27 @@ export default function AdminView({ userEmail }: { userEmail: string }) {
   const router = useRouter()
   const [loading, setLoading] = useState(true)
   
-  // ビュー管理
   type ViewState = 'job_list' | 'job_detail' | 'create_job' | 'qr' | 'news_list' | 'edit_news' | 'user_search'
   const [activeView, setActiveView] = useState<ViewState>('job_list')
 
-  // --- 共通データ ---
   const [allBadges, setAllBadges] = useState<Badge[]>([])
 
-  // --- QR用 State ---
   const [events, setEvents] = useState<ExternalEvent[]>([])
   const [selectedEventId, setSelectedEventId] = useState<number | null>(null)
   const [qrValue, setQrValue] = useState('')
   const [isQrProcessing, setIsQrProcessing] = useState(false)
 
-  // --- Job用 State ---
   const [jobs, setJobs] = useState<Job[]>([])
   const [selectedJobId, setSelectedJobId] = useState<number | null>(null)
   const [selectedJob, setSelectedJob] = useState<Job | null>(null)
   const [applicants, setApplicants] = useState<Applicant[]>([])
 
-  // --- Create Job用 State ---
-  // 報酬は数値で入力させ、保存時に「円」をつける
   const [newJob, setNewJob] = useState({
     title: '', description: '', reward_val: '', required_rank: 'ビギナー', deadline: ''
   })
-  const [newJobBadges, setNewJobBadges] = useState<number[]>([]) // 選択された必須バッジID
+  const [newJobBadges, setNewJobBadges] = useState<number[]>([]) 
   const [isJobSubmitting, setIsJobSubmitting] = useState(false)
 
-  // --- News用 State ---
   const [newsList, setNewsList] = useState<NewsFeed[]>([])
   const [editingNewsId, setEditingNewsId] = useState<number | null>(null)
   const [newsForm, setNewsForm] = useState<NewsFormState>({
@@ -142,16 +133,12 @@ export default function AdminView({ userEmail }: { userEmail: string }) {
   const [isNewsSubmitting, setIsNewsSubmitting] = useState(false)
   const [isSyncingNews, setIsSyncingNews] = useState(false)
 
-  // --- News Source用 State ---
   const [sources, setSources] = useState<NewsSource[]>([])
   const [newSource, setNewSource] = useState({ name: '', rss_url: '', fallback_url: '' })
 
-  // --- User Search / Scout用 State ---
   const [users, setUsers] = useState<UserProfile[]>([])
-  // フィルタ用
   const [filterRank, setFilterRank] = useState<string>('all')
   const [filterBadge, setFilterBadge] = useState<number | 'all'>('all')
-  // 複数選択用
   const [selectedUserIds, setSelectedUserIds] = useState<Set<string>>(new Set())
 
   const [scoutForm, setScoutForm] = useState<ScoutFormState>({
@@ -159,7 +146,6 @@ export default function AdminView({ userEmail }: { userEmail: string }) {
   })
   const [isScoutSending, setIsScoutSending] = useState(false)
 
-  // --- Chat用 State ---
   const [activeChatApplicant, setActiveChatApplicant] = useState<Applicant | null>(null)
   const [chatMessages, setChatMessages] = useState<ChatMessage[]>([])
   const [chatInput, setChatInput] = useState('')
@@ -173,7 +159,6 @@ export default function AdminView({ userEmail }: { userEmail: string }) {
       return
     }
     const init = async () => {
-      // イベント取得
       const { data: eventData } = await eventSupabase
         .from('events')
         .select('id, title, event_date')
@@ -181,7 +166,6 @@ export default function AdminView({ userEmail }: { userEmail: string }) {
         .returns<ExternalEvent[]>()
       setEvents(eventData || [])
 
-      // バッジマスタ取得
       const { data: badgeData } = await supabase.from('badges').select('*').returns<Badge[]>()
       setAllBadges(badgeData || [])
       
@@ -194,7 +178,6 @@ export default function AdminView({ userEmail }: { userEmail: string }) {
     void init()
   }, [userEmail, router])
 
-  // --- Fetch Functions ---
   const fetchJobs = async () => {
     const { data } = await supabase.from('jobs').select('*').order('created_at', { ascending: false }).returns<Job[]>()
     setJobs(data || [])
@@ -225,7 +208,6 @@ export default function AdminView({ userEmail }: { userEmail: string }) {
     setUsers(data || [])
   }
 
-  // --- Job Logic ---
   const handleJobClick = async (job: Job) => {
     setSelectedJobId(job.id)
     setSelectedJob(job)
@@ -237,7 +219,6 @@ export default function AdminView({ userEmail }: { userEmail: string }) {
       .eq('job_id', job.id)
       .order('created_at', { ascending: false })
 
-    // 型キャスト用
     type AppResponse = {
         id: number; user_id: string; status: string; message: string; created_at: string;
         user: { email: string; current_rank: string; total_xp: number } | null
@@ -283,7 +264,6 @@ export default function AdminView({ userEmail }: { userEmail: string }) {
     try {
       const { data: { user } } = await supabase.auth.getUser()
       
-      // 報酬額に「円」をつける
       const rewardFormatted = newJob.reward_val ? `${Number(newJob.reward_val).toLocaleString()}円` : '応相談'
 
       const { error } = await supabase.from('jobs').insert({
@@ -291,7 +271,7 @@ export default function AdminView({ userEmail }: { userEmail: string }) {
         description: newJob.description,
         reward_amount: rewardFormatted,
         required_rank: newJob.required_rank,
-        required_badges: newJobBadges.length > 0 ? newJobBadges : null, // バッジ指定
+        required_badges: newJobBadges.length > 0 ? newJobBadges : null,
         deadline: newJob.deadline || null,
         owner_id: user?.id,
         is_active: true
@@ -299,7 +279,6 @@ export default function AdminView({ userEmail }: { userEmail: string }) {
       if (error) throw error
       alert('作成しました！')
       
-      // リセット
       setNewJob({ title: '', description: '', reward_val: '', required_rank: 'ビギナー', deadline: '' })
       setNewJobBadges([])
       
@@ -318,7 +297,6 @@ export default function AdminView({ userEmail }: { userEmail: string }) {
     )
   }
 
-  // --- QR Logic ---
   const handleEventSelect = async (e: React.ChangeEvent<HTMLSelectElement>) => {
     const eid = Number(e.target.value)
     setSelectedEventId(eid || null)
@@ -343,7 +321,6 @@ export default function AdminView({ userEmail }: { userEmail: string }) {
     window.print()
   }
 
-  // --- News Logic ---
   const handleSyncNews = async () => {
     setIsSyncingNews(true)
     try {
@@ -366,13 +343,14 @@ export default function AdminView({ userEmail }: { userEmail: string }) {
         alert('同期エラー: ' + (data.message || '詳細不明'))
       }
     } catch (e) {
+      // eslint-disable-next-line @typescript-eslint/no-unused-vars
+      const _ = e
       alert('通信エラーが発生しました')
     } finally {
       setIsSyncingNews(false)
     }
   }
 
-  // ... (Newsソース追加・削除、ニュース編集ロジックは前回と同様のため省略なしで実装します) ...
   const handleAddSource = async () => {
     if (!newSource.name || !newSource.rss_url) return alert('名称とRSS URLは必須です')
     const { error } = await supabase.from('news_sources').insert({ name: newSource.name, rss_url: newSource.rss_url, fallback_url: newSource.fallback_url || null })
@@ -405,12 +383,11 @@ export default function AdminView({ userEmail }: { userEmail: string }) {
         if (error) throw error; alert('作成しました')
       }
       void fetchNews(); setActiveView('news_list')
-    } catch (e: any) { alert('エラー: ' + e.message) } finally { setIsNewsSubmitting(false) }
+    } catch (e: unknown) { 
+      if (e instanceof Error) alert('エラー: ' + e.message) 
+    } finally { setIsNewsSubmitting(false) }
   }
 
-  // --- Scout Logic (Enhanced) ---
-  
-  // ユーザー選択ロジック
   const toggleUserSelection = (userId: string) => {
     const newSet = new Set(selectedUserIds)
     if (newSet.has(userId)) newSet.delete(userId)
@@ -426,7 +403,6 @@ export default function AdminView({ userEmail }: { userEmail: string }) {
 
   const clearSelection = () => setSelectedUserIds(new Set())
 
-  // フィルタリング
   const filteredUsers = users.filter(user => {
     const rankMatch = filterRank === 'all' || user.current_rank === filterRank
     const badgeMatch = filterBadge === 'all' || user.user_badges.some(ub => ub.badge?.id === filterBadge)
@@ -455,7 +431,6 @@ export default function AdminView({ userEmail }: { userEmail: string }) {
 
     setIsScoutSending(true)
     try {
-      // 複数件insert
       const insertData = scoutForm.targetUserIds.map(uid => ({
         user_id: uid,
         job_id: Number(scoutForm.jobId),
@@ -469,7 +444,7 @@ export default function AdminView({ userEmail }: { userEmail: string }) {
       
       alert(`${count}件のスカウトを送信しました！`)
       setScoutForm({ targetUserIds: [], targetUserNames: [], jobId: '', message: '' })
-      setSelectedUserIds(new Set()) // 選択解除
+      setSelectedUserIds(new Set()) 
     } catch (e) {
       if (e instanceof Error) alert('送信エラー: ' + e.message)
     } finally {
@@ -477,7 +452,6 @@ export default function AdminView({ userEmail }: { userEmail: string }) {
     }
   }
 
-  // --- Chat Logic ---
   const openChat = async (app: Applicant) => {
     setActiveChatApplicant(app)
     setChatMessages([])
@@ -497,7 +471,11 @@ export default function AdminView({ userEmail }: { userEmail: string }) {
       const newMsg = { id: Date.now(), content: chatInput.trim(), sender_id: user.id, created_at: new Date().toISOString() }
       setChatMessages(prev => [...prev, newMsg]); setChatInput('')
       setTimeout(() => messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' }), 100)
-    } catch(e) { alert('送信エラー') } finally { setIsChatSending(false) }
+    } catch(e) { 
+      // eslint-disable-next-line @typescript-eslint/no-unused-vars
+      const _ = e
+      alert('送信エラー') 
+    } finally { setIsChatSending(false) }
   }
 
   const handleLogout = async () => { await supabase.auth.signOut(); router.push('/login') }
@@ -506,7 +484,6 @@ export default function AdminView({ userEmail }: { userEmail: string }) {
 
   return (
     <div className="min-h-screen bg-slate-50 font-sans text-gray-900 flex flex-col">
-      {/* 印刷時に隠すエリア */}
       <div className="print:hidden">
         <header className="bg-slate-800 text-white shadow-md sticky top-0 z-30 px-4 sm:px-6 py-4 flex justify-between items-center">
           <div className="flex items-center gap-2"><span className="text-xl">🛡️</span><h1 className="text-lg font-bold">管理者コンソール</h1></div>
@@ -514,7 +491,6 @@ export default function AdminView({ userEmail }: { userEmail: string }) {
         </header>
 
         <div className="flex flex-col md:flex-row flex-1 max-w-6xl mx-auto w-full p-4 gap-6 items-start">
-          {/* ナビゲーション (スマホは横スクロール、PCは縦並び) */}
           <nav className="w-full md:w-64 bg-white rounded-xl shadow-sm border border-gray-200 overflow-x-auto md:overflow-visible flex md:flex-col shrink-0 sticky top-20 z-20">
             <button onClick={() => setActiveView('job_list')} className={`text-left px-6 py-4 font-bold text-sm flex gap-3 whitespace-nowrap ${['job_list', 'job_detail'].includes(activeView) ? 'bg-blue-50 text-blue-600 md:border-l-4 md:border-b-0 border-b-4 border-blue-600' : 'text-gray-600 hover:bg-gray-50'}`}><span>📋</span> 求人管理</button>
             <button onClick={() => setActiveView('create_job')} className={`text-left px-6 py-4 font-bold text-sm flex gap-3 whitespace-nowrap ${activeView === 'create_job' ? 'bg-blue-50 text-blue-600 md:border-l-4 md:border-b-0 border-b-4 border-blue-600' : 'text-gray-600 hover:bg-gray-50'}`}><span>✏️</span> 求人作成</button>
@@ -525,7 +501,6 @@ export default function AdminView({ userEmail }: { userEmail: string }) {
 
           <main className="flex-1 bg-white rounded-xl shadow-sm border border-gray-200 min-h-[600px] p-4 sm:p-6 relative w-full overflow-hidden">
             
-            {/* === 1. 求人一覧 === */}
             {activeView === 'job_list' && (
                <div className="animate-fade-in-up">
                 <h2 className="text-xl font-bold text-gray-800 mb-6">求人リスト</h2>
@@ -550,7 +525,6 @@ export default function AdminView({ userEmail }: { userEmail: string }) {
               </div>
             )}
 
-            {/* === 2. 求人詳細 === */}
             {activeView === 'job_detail' && selectedJob && (
                <div className="animate-fade-in-up">
                 <button onClick={() => setActiveView('job_list')} className="mb-4 text-sm text-blue-600 hover:underline font-bold flex items-center gap-1">← 一覧に戻る</button>
@@ -576,7 +550,7 @@ export default function AdminView({ userEmail }: { userEmail: string }) {
                         <tr key={app.id} className="bg-white border-b hover:bg-gray-50">
                           <td className="px-4 py-4"><span className={`px-2 py-1 rounded text-xs font-bold text-white ${app.status === 'approved' ? 'bg-green-500' : app.status === 'rejected' ? 'bg-red-400' : 'bg-yellow-400'}`}>{app.status.toUpperCase()}</span></td>
                           <td className="px-4 py-4"><div className="font-bold text-gray-900">{app.user.email}</div><div className="text-xs">Rank: {app.user.current_rank} / XP: {app.user.total_xp}</div></td>
-                          <td className="px-4 py-4 text-gray-600 italic">"{app.message}"</td>
+                          <td className="px-4 py-4 text-gray-600 italic">&quot;{app.message}&quot;</td>
                           <td className="px-4 py-4 text-right">
                             <div className="flex gap-2 justify-end items-center">
                               <button onClick={() => openChat(app)} className="text-xs bg-slate-100 text-slate-600 px-3 py-1.5 rounded font-bold hover:bg-slate-200 flex items-center gap-1">💬 チャット</button>
@@ -597,7 +571,6 @@ export default function AdminView({ userEmail }: { userEmail: string }) {
               </div>
             )}
 
-            {/* === 3. 求人作成 (強化版) === */}
             {activeView === 'create_job' && (
                <div className="animate-fade-in-up">
                 <h2 className="text-xl font-bold text-gray-800 mb-6">新規クエスト作成</h2>
@@ -633,7 +606,6 @@ export default function AdminView({ userEmail }: { userEmail: string }) {
                     </div>
                   </div>
 
-                  {/* 必須称号の選択 */}
                   <div>
                     <label className="block text-sm font-bold text-gray-700 mb-2">必須称号 (任意・複数選択可)</label>
                     <div className="bg-gray-50 p-4 rounded-lg border border-gray-200 max-h-40 overflow-y-auto grid grid-cols-2 gap-2">
@@ -660,10 +632,8 @@ export default function AdminView({ userEmail }: { userEmail: string }) {
               </div>
             )}
 
-            {/* === 4. お知らせ管理 === */}
             {activeView === 'news_list' && (
               <div className="animate-fade-in-up">
-                {/* 省略なし: Newsソース管理 */}
                 <div className="mb-8 border-b border-gray-100 pb-8">
                   <h3 className="font-bold text-gray-700 mb-4 flex items-center gap-2">📡 監視対象の管理</h3>
                   <div className="grid gap-3 mb-4">
@@ -734,12 +704,10 @@ export default function AdminView({ userEmail }: { userEmail: string }) {
               </div>
             )}
 
-            {/* === 5. ユーザー検索 & スカウト (強化版) === */}
             {activeView === 'user_search' && (
               <div className="animate-fade-in-up">
                 <h2 className="text-xl font-bold text-gray-800 mb-6">ユーザー検索・一斉スカウト</h2>
                 
-                {/* フィルタエリア */}
                 <div className="bg-gray-50 p-4 rounded-xl border border-gray-200 mb-4 flex flex-col sm:flex-row gap-4 items-end sm:items-center justify-between">
                   <div className="flex flex-col sm:flex-row gap-3 w-full sm:w-auto">
                     <div>
@@ -762,7 +730,6 @@ export default function AdminView({ userEmail }: { userEmail: string }) {
                     </div>
                   </div>
                   
-                  {/* 一斉送信ボタン */}
                   <div className="w-full sm:w-auto flex gap-2 justify-end">
                     {selectedUserIds.size > 0 && (
                       <>
@@ -830,7 +797,6 @@ export default function AdminView({ userEmail }: { userEmail: string }) {
               </div>
             )}
 
-            {/* === QR発行 (強化版) === */}
             {activeView === 'qr' && (
               <div className="animate-fade-in-up">
                 <h2 className="text-xl font-bold text-gray-800 mb-6">イベントQR発行</h2>
@@ -844,7 +810,6 @@ export default function AdminView({ userEmail }: { userEmail: string }) {
                 {qrValue && (
                   <div className="text-center">
                     <div className="bg-white p-6 inline-block border-4 border-dashed border-gray-200 rounded-xl mb-4">
-                      {/* サイズアップ */}
                       <QRCodeSVG value={qrValue} size={300} />
                     </div>
                     <p className="text-xs text-gray-500 font-mono mb-4">{qrValue}</p>
@@ -856,7 +821,6 @@ export default function AdminView({ userEmail }: { userEmail: string }) {
               </div>
             )}
 
-            {/* スカウトモーダル (一斉送信対応) */}
             {scoutForm.targetUserIds.length > 0 && (
               <div className="fixed inset-0 bg-black/50 z-50 flex items-center justify-center p-4">
                  <div className="bg-white rounded-xl shadow-2xl w-full max-w-md overflow-hidden animate-fade-in-up">
@@ -906,7 +870,6 @@ export default function AdminView({ userEmail }: { userEmail: string }) {
               </div>
             )}
 
-            {/* チャットモーダル */}
             {activeChatApplicant && (
               <div className="fixed inset-0 bg-black/50 z-50 flex items-center justify-center p-4">
                  <div className="bg-white w-full max-w-lg h-[80vh] rounded-xl shadow-2xl flex flex-col overflow-hidden animate-fade-in-up">
@@ -940,7 +903,6 @@ export default function AdminView({ userEmail }: { userEmail: string }) {
         </div>
       </div>
 
-      {/* 印刷用レイアウト (print:block, 他では print:hidden) */}
       <div className="hidden print:flex print:flex-col print:items-center print:justify-center print:min-h-screen p-10 text-center">
         <h1 className="text-3xl font-bold mb-4">{events.find(e => e.id === selectedEventId)?.title}</h1>
         <p className="text-xl mb-8">チェックイン用QRコード</p>

@@ -1,10 +1,9 @@
 // app/api/fetch-news/route.ts
 import { createClient } from '@supabase/supabase-js'
-import { NextResponse } from 'next/server' // createServerClient, cookies は削除してOKです
+import { NextResponse } from 'next/server'
 import Parser from 'rss-parser'
 import * as cheerio from 'cheerio'
 
-// 管理者権限でのDB操作用 (Service Role Keyがあればそれを使う)
 const supabaseAdmin = createClient(
   process.env.NEXT_PUBLIC_SUPABASE_URL!,
   process.env.SUPABASE_SERVICE_ROLE_KEY || process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY!
@@ -12,7 +11,6 @@ const supabaseAdmin = createClient(
 
 const parser = new Parser()
 
-// ... (FEED_URLS 定義はそのまま) ...
 const FEED_URLS = [
   {
     url: 'https://shizuoka-connect.com/feed', 
@@ -28,23 +26,19 @@ const ADMIN_EMAILS = [
 ]
 
 export async function POST(request: Request) {
-  // 1. Cron/Cloudflareからのアクセス確認 (Cron Secret)
   const authHeader = request.headers.get('authorization')
   const isCronAuthorized = authHeader === `Bearer ${process.env.CRON_SECRET}`
 
-  // 2. ブラウザ(管理者)からのアクセス確認
   let isUserAuthorized = false
   let userEmail = '未ログイン'
 
   if (!isCronAuthorized) {
-    // ★変更: Cookieではなく、ヘッダーから直接トークンを受け取る
     const token = request.headers.get('x-supabase-auth')
     
     if (token) {
-      // トークンを使ってユーザー情報をSupabaseに問い合わせる
-      const { data: { user }, error } = await supabaseAdmin.auth.getUser(token)
+      const { data: { user } } = await supabaseAdmin.auth.getUser(token)
       
-      if (!error && user && user.email) {
+      if (user && user.email) {
         userEmail = user.email
         if (ADMIN_EMAILS.includes(user.email)) {
           isUserAuthorized = true
@@ -53,7 +47,6 @@ export async function POST(request: Request) {
     }
   }
 
-  // 認証チェック
   if (!isCronAuthorized && !isUserAuthorized) {
     const debugMessage = isCronAuthorized 
       ? 'Cron:OK' 
@@ -65,7 +58,6 @@ export async function POST(request: Request) {
     }, { status: 401 })
   }
 
-  // --- 以下、クロール処理（そのまま） ---
   const logs: string[] = []
   let addedCount = 0
   let totalFound = 0
@@ -86,10 +78,7 @@ export async function POST(request: Request) {
       : FEED_URLS
 
     for (const feedConfig of targetSources) {
-      // ... (中身のクロールロジックは変更なし。前回と同じコードを使用してください) ...
-      // 長くなるため省略しますが、前回のコードのまま貼り付けてください
-      
-      // ↓↓↓ ここからコピペ用（念のため中身も記載します） ↓↓↓
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
       let items: any[] = []
       logs.push(`🔍 ${feedConfig.source_name}`)
 
@@ -105,7 +94,11 @@ export async function POST(request: Request) {
           }))
           logs.push(`  ✅ RSS: ${items.length}件`)
         }
-      } catch (e) { /* 無視 */ }
+      } catch (e) { 
+        // eslint-disable-next-line @typescript-eslint/no-unused-vars
+        const _ = e
+        /* RSS失敗は無視 */ 
+      }
 
       if (items.length === 0 && feedConfig.fallbackUrl) {
         try {
@@ -129,7 +122,11 @@ export async function POST(request: Request) {
           })
           items = Array.from(new Map(items.map(item => [item.link, item])).values())
           if (items.length > 0) logs.push(`  ✅ HTML: ${items.length}件`)
-        } catch (err) { /* 無視 */ }
+        } catch (err) { 
+          // eslint-disable-next-line @typescript-eslint/no-unused-vars
+          const _ = err
+          /* HTML解析失敗は無視 */ 
+        }
       }
       totalFound += items.length
       for (const item of items) {
@@ -148,7 +145,6 @@ export async function POST(request: Request) {
           addedCount++
         }
       }
-      // ↑↑↑ ここまでコピペ用 ↑↑↑
     }
 
     return NextResponse.json({ 
@@ -157,7 +153,9 @@ export async function POST(request: Request) {
       details: logs
     })
 
-  } catch (error: any) {
-    return NextResponse.json({ success: false, message: error.message, details: logs }, { status: 500 })
+  } catch (error: unknown) {
+    let message = 'Unknown error'
+    if (error instanceof Error) message = error.message
+    return NextResponse.json({ success: false, message: message, details: logs }, { status: 500 })
   }
 }
