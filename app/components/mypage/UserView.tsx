@@ -5,6 +5,7 @@ import { supabase } from '@/app/lib/supabaseClient'
 import { eventSupabase } from '@/app/lib/eventDbClient'
 import { useRouter } from 'next/navigation'
 import Link from 'next/link'
+import NotificationManager from '../NotificationManager'
 
 const EXTERNAL_SITE_URL = 'https://hamamtsu-events.shizuoka-connect.com'
 
@@ -400,6 +401,8 @@ export default function UserView({ userId, userEmail }: { userId: string, userEm
       </div>
     )
   }
+
+  <NotificationManager />
 
   const QuestDashboard = ({ isHome = false }: { isHome?: boolean }) => {
     const visibleApprovedApps = isHome 
