@@ -1,17 +1,16 @@
 // app/api/fetch-news/route.ts
 import { createClient } from '@supabase/supabase-js'
 import { NextResponse } from 'next/server'
-import Parser from 'rss-parser'
 import * as cheerio from 'cheerio'
 
+// Cloudflare Pages (Edge Runtime) で動作させる設定
 export const runtime = 'edge'
 
+// 管理者権限でのDB操作用
 const supabaseAdmin = createClient(
   process.env.NEXT_PUBLIC_SUPABASE_URL!,
   process.env.SUPABASE_SERVICE_ROLE_KEY || process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY!
 )
-
-const parser = new Parser()
 
 const FEED_URLS = [
   {
@@ -27,20 +26,84 @@ const ADMIN_EMAILS = [
   'campustocommunityshizuoka@gmail.com'
 ]
 
+// --- 型定義 ---
+
+interface RssItem {
+  title: string
+  link: string
+  contentSnippet: string
+  content: string
+  pubDate: string
+  image: string | null
+}
+
+interface FeedConfig {
+  url: string
+  fallbackUrl?: string
+  source_name: string
+  default_image: string
+}
+
+interface NewsSourceDB {
+  id: number
+  name: string
+  rss_url: string
+  fallback_url: string | null
+  default_image_url: string | null
+}
+
+// 簡易RSSパーサー (ライブラリ依存なし・型安全)
+async function parseRss(url: string): Promise<{ items: RssItem[] }> {
+  try {
+    const res = await fetch(url)
+    if (!res.ok) throw new Error(`Fetch failed: ${res.status}`)
+    const text = await res.text()
+    
+    // 単純なXML解析 (cheerioを利用)
+    const $ = cheerio.load(text, { xmlMode: true })
+    const items: RssItem[] = []
+
+    $('item').each((_, el) => {
+      // cheerioのElementをラップ
+      const $el = $(el)
+      const title = $el.find('title').text()
+      const link = $el.find('link').text()
+      const pubDate = $el.find('pubDate').text()
+      const content = $el.find('content\\:encoded').text() || $el.find('description').text()
+      
+      if (title && link) {
+        items.push({
+          title,
+          link,
+          contentSnippet: content.replace(/<[^>]+>/g, '').substring(0, 100) + '...', // HTMLタグ除去
+          content,
+          pubDate,
+          image: null // 必要ならここで抽出ロジックを追加
+        })
+      }
+    })
+
+    return { items }
+  } catch (e) {
+    console.error('RSS Parse Error:', e)
+    return { items: [] }
+  }
+}
+
 export async function POST(request: Request) {
+  // 1. Cron/Cloudflareからのアクセス確認
   const authHeader = request.headers.get('authorization')
   const isCronAuthorized = authHeader === `Bearer ${process.env.CRON_SECRET}`
 
+  // 2. ブラウザ(管理者)からのアクセス確認
   let isUserAuthorized = false
   let userEmail = '未ログイン'
 
   if (!isCronAuthorized) {
     const token = request.headers.get('x-supabase-auth')
-    
     if (token) {
-      const { data: { user } } = await supabaseAdmin.auth.getUser(token)
-      
-      if (user && user.email) {
+      const { data: { user }, error } = await supabaseAdmin.auth.getUser(token)
+      if (!error && user && user.email) {
         userEmail = user.email
         if (ADMIN_EMAILS.includes(user.email)) {
           isUserAuthorized = true
@@ -49,6 +112,7 @@ export async function POST(request: Request) {
     }
   }
 
+  // 認証チェック
   if (!isCronAuthorized && !isUserAuthorized) {
     const debugMessage = isCronAuthorized 
       ? 'Cron:OK' 
@@ -69,71 +133,87 @@ export async function POST(request: Request) {
       logs.push('⚠️ 警告: SUPABASE_SERVICE_ROLE_KEY設定なし')
     }
 
+    // DBから監視対象リストを取得
     const { data: sources } = await supabaseAdmin
       .from('news_sources')
       .select('*')
       .eq('is_active', true) 
-      .returns<{id: number, name: string, rss_url: string, fallback_url: string | null, default_image_url: string | null}[]>()
+      .returns<NewsSourceDB[]>()
 
-    const targetSources = (sources && sources.length > 0) 
-      ? sources.map(s => ({ url: s.rss_url, fallbackUrl: s.fallback_url || undefined, source_name: s.name, default_image: s.default_image_url || FEED_URLS[0].default_image }))
+    const targetSources: FeedConfig[] = (sources && sources.length > 0) 
+      ? sources.map(s => ({ 
+          url: s.rss_url, 
+          fallbackUrl: s.fallback_url || undefined, 
+          source_name: s.name, 
+          default_image: s.default_image_url || FEED_URLS[0].default_image 
+        }))
       : FEED_URLS
 
     for (const feedConfig of targetSources) {
-      // eslint-disable-next-line @typescript-eslint/no-explicit-any
-      let items: any[] = []
+      let items: RssItem[] = []
       logs.push(`🔍 ${feedConfig.source_name}`)
 
       try {
-        const feed = await parser.parseURL(feedConfig.url)
-        if (feed.items?.length > 0) {
-          items = feed.items.map(item => ({
-            title: item.title,
-            link: item.link,
-            content: item.contentSnippet || item.content,
-            pubDate: item.pubDate ? new Date(item.pubDate).toISOString() : new Date().toISOString(),
-            image: null
-          }))
+        // 自作関数でパース
+        const feed = await parseRss(feedConfig.url)
+        if (feed.items && feed.items.length > 0) {
+          items = feed.items
           logs.push(`  ✅ RSS: ${items.length}件`)
         }
       } catch (e) { 
-        // eslint-disable-next-line @typescript-eslint/no-unused-vars
-        const _ = e
-        /* RSS失敗は無視 */ 
+        logs.push(`  ℹ️ RSS失敗`) 
       }
 
+      // RSSで取れなかった場合のフォールバック (HTML解析)
       if (items.length === 0 && feedConfig.fallbackUrl) {
         try {
           const res = await fetch(feedConfig.fallbackUrl)
           const html = await res.text()
           const $ = cheerio.load(html)
+          
+          const fallbackItems: RssItem[] = []
+
           $('a').each((_, el) => {
-            const link = $(el).attr('href')
-            const text = $(el).text().trim()
+            const $el = $(el)
+            const linkAttr = $el.attr('href')
+            const text = $el.text().trim()
             const dateMatch = text.match(/202\d[-./]\d{1,2}[-./]\d{1,2}/)
-            if (link && text.length > 5 && dateMatch) {
-              const absoluteLink = link.startsWith('http') ? link : new URL(link, feedConfig.fallbackUrl!).toString()
-              items.push({
+            
+            if (linkAttr && text.length > 5 && dateMatch && feedConfig.fallbackUrl) {
+              const absoluteLink = linkAttr.startsWith('http') ? linkAttr : new URL(linkAttr, feedConfig.fallbackUrl).toString()
+              fallbackItems.push({
                 title: text.replace(dateMatch[0], '').trim(),
                 link: absoluteLink,
                 content: text,
+                contentSnippet: text,
                 pubDate: new Date(dateMatch[0].replace(/\./g, '-')).toISOString(),
                 image: null
               })
             }
           })
-          items = Array.from(new Map(items.map(item => [item.link, item])).values())
+          
+          // 重複排除 (Mapを使用)
+          const uniqueItems = new Map<string, RssItem>()
+          fallbackItems.forEach(item => uniqueItems.set(item.link, item))
+          items = Array.from(uniqueItems.values())
+          
           if (items.length > 0) logs.push(`  ✅ HTML: ${items.length}件`)
         } catch (err) { 
-          // eslint-disable-next-line @typescript-eslint/no-unused-vars
-          const _ = err
-          /* HTML解析失敗は無視 */ 
+          /* 無視 */ 
         }
       }
+
       totalFound += items.length
+
       for (const item of items) {
         if (!item.link || !item.title) continue
-        const { data: existing } = await supabaseAdmin.from('news_feeds').select('id').eq('link_url', item.link).single()
+        
+        const { data: existing } = await supabaseAdmin
+          .from('news_feeds')
+          .select('id')
+          .eq('link_url', item.link)
+          .single()
+
         if (!existing) {
           const imageUrl = item.image || feedConfig.default_image
           await supabaseAdmin.from('news_feeds').insert({
@@ -156,8 +236,7 @@ export async function POST(request: Request) {
     })
 
   } catch (error: unknown) {
-    let message = 'Unknown error'
-    if (error instanceof Error) message = error.message
-    return NextResponse.json({ success: false, message: message, details: logs }, { status: 500 })
+    const errorMessage = error instanceof Error ? error.message : 'Unknown error'
+    return NextResponse.json({ success: false, message: errorMessage, details: logs }, { status: 500 })
   }
 }
