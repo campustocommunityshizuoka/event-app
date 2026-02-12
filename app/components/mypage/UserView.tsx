@@ -402,7 +402,6 @@ export default function UserView({ userId, userEmail }: { userId: string, userEm
     )
   }
 
-  <NotificationManager />
 
   const QuestDashboard = ({ isHome = false }: { isHome?: boolean }) => {
     const visibleApprovedApps = isHome 
@@ -657,7 +656,7 @@ export default function UserView({ userId, userEmail }: { userId: string, userEm
             </div>
 
             <NewsCarousel newsItems={news} />
-
+            <NotificationManager />
             <QuestDashboard isHome={true} />
 
             <section>
