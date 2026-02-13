@@ -6,6 +6,7 @@ import { eventSupabase } from '@/app/lib/eventDbClient'
 import { useRouter } from 'next/navigation'
 import Link from 'next/link'
 import NotificationManager from '../NotificationManager'
+import OnboardingModal from '../OnboardingModal' // ★追加: オンボーディングモーダル
 
 const EXTERNAL_SITE_URL = 'https://hamamtsu-events.shizuoka-connect.com'
 
@@ -658,6 +659,7 @@ export default function UserView({ userId, userEmail }: { userId: string, userEm
             <NewsCarousel newsItems={news} />
             <NotificationManager />
             <QuestDashboard isHome={true} />
+            <OnboardingModal />
 
             <section>
                <div className="flex items-center justify-between mb-3 px-1"><h3 className="font-bold text-gray-700 flex items-center gap-2"><span>📅</span> 開催予定のイベント</h3><button onClick={() => setActiveTab('events')} className="text-xs text-blue-600 font-bold hover:underline">すべて見る</button></div>
