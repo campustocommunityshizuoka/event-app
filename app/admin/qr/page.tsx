@@ -1,6 +1,6 @@
 'use client'
 
-import { useEffect, useState, Suspense } from 'react' // Suspenseを追加
+import { useEffect, useState, Suspense } from 'react'
 import { supabase } from '@/app/lib/supabaseClient'
 import { eventSupabase } from '@/app/lib/eventDbClient'
 import { useRouter, useSearchParams } from 'next/navigation'
@@ -11,7 +11,7 @@ const ADMIN_EMAILS = [
   'campustocommunityshizuoka@gmail.com'
 ]
 
-// ★対象のPoster ID
+// ★対象のPoster ID (しずおかコネクト)
 const TARGET_POSTER_ID = '5ef710d4-3583-4ff9-a010-ddec40616767'
 
 type ExternalEvent = {
@@ -40,11 +40,11 @@ function AdminQRContent() {
       if (user && user.email && ADMIN_EMAILS.includes(user.email)) {
         setIsAdmin(true)
         
-        // ★フィルタリングを追加: 指定されたposter_idのイベントのみ取得
+        // ★フィルタリング: 指定されたposter_id (しずおかコネクト) のイベントのみ取得
         const { data, error } = await eventSupabase
           .from('events') 
           .select('id, title, event_date') 
-          .eq('poster_id', TARGET_POSTER_ID) // 追加
+          .eq('poster_id', TARGET_POSTER_ID) // しずおかコネクト主催のみ
           .order('event_date', { ascending: false })
 
         if (error) {

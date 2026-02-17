@@ -6,6 +6,8 @@ import { eventSupabase } from '@/app/lib/eventDbClient'
 import { useRouter } from 'next/navigation'
 import { QRCodeSVG } from 'qrcode.react'
 
+const SHIZUOKA_CONNECT_POSTER_ID = '5ef710d4-3583-4ff9-a010-ddec40616767'
+
 // --- 定数 & 型定義 ---
 const ADMIN_EMAILS = [
   'admin@test.com',
@@ -100,11 +102,29 @@ type ChatMessage = {
   created_at: string
 }
 
+// ★ 追加: レポート用の型定義
+type EventReport = {
+  id: number
+  content: string
+  rating: number
+  xp_bonus: number
+  created_at: string
+  user: {
+    email: string
+    username: string | null
+    avatar_url: string | null
+  }
+  participation: {
+    event_id: number
+  }
+}
+
 export default function AdminView({ userEmail }: { userEmail: string }) {
   const router = useRouter()
   const [loading, setLoading] = useState(true)
   
-  type ViewState = 'job_list' | 'job_detail' | 'create_job' | 'qr' | 'news_list' | 'edit_news' | 'user_search'
+  // ★ 修正: 'reports' を追加
+  type ViewState = 'job_list' | 'job_detail' | 'create_job' | 'qr' | 'news_list' | 'edit_news' | 'user_search' | 'reports'
   const [activeView, setActiveView] = useState<ViewState>('job_list')
 
   const [allBadges, setAllBadges] = useState<Badge[]>([])
@@ -152,6 +172,10 @@ export default function AdminView({ userEmail }: { userEmail: string }) {
   const [isChatSending, setIsChatSending] = useState(false)
   const messagesEndRef = useRef<HTMLDivElement>(null)
 
+  // ★ 追加: レポート管理用ステート
+  const [reports, setReports] = useState<EventReport[]>([])
+  const [reportFilterEventId, setReportFilterEventId] = useState<number | 'all'>('all')
+
   useEffect(() => {
     if (!ADMIN_EMAILS.includes(userEmail)) {
       alert('権限がありません')
@@ -162,6 +186,9 @@ export default function AdminView({ userEmail }: { userEmail: string }) {
       const { data: eventData } = await eventSupabase
         .from('events')
         .select('id, title, event_date')
+        // ★ここに追加: しずおかコネクト主催イベントのみに絞り込み
+        .eq('poster_id', SHIZUOKA_CONNECT_POSTER_ID)
+        // --------------------------------------
         .order('event_date', { ascending: false })
         .returns<ExternalEvent[]>()
       setEvents(eventData || [])
@@ -173,6 +200,7 @@ export default function AdminView({ userEmail }: { userEmail: string }) {
       void fetchNews()
       void fetchSources()
       void fetchUsers()
+      void fetchReports() // ★ 追加
       setLoading(false)
     }
     void init()
@@ -208,6 +236,42 @@ export default function AdminView({ userEmail }: { userEmail: string }) {
     setUsers(data || [])
   }
 
+  // ★ 追加: レポート取得関数
+  const fetchReports = async () => {
+    // ネストしたリレーションを取得: report -> participation -> (event_id)
+    const { data, error } = await supabase
+      .from('event_reports')
+      .select(`
+        *,
+        user:profiles(email, username, avatar_url),
+        participation:participations(event_id)
+      `)
+      .order('created_at', { ascending: false })
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      .returns<any[]>() // 型定義の複雑さを回避するため一時的にany
+
+    if (!error && data) {
+      // 型アサーションで整形
+      const formattedReports: EventReport[] = data.map(r => ({
+        id: r.id,
+        content: r.content,
+        rating: r.rating,
+        xp_bonus: r.xp_bonus,
+        created_at: r.created_at,
+        user: {
+          email: r.user?.email || 'Unknown',
+          username: r.user?.username,
+          avatar_url: r.user?.avatar_url
+        },
+        participation: {
+          event_id: r.participation?.event_id || 0
+        }
+      }))
+      setReports(formattedReports)
+    }
+  }
+
+  // ... (既存の handleJobClick, handleDeleteJob, updateStatus, handleCreateJob 等の関数はそのまま維持) ...
   const handleJobClick = async (job: Job) => {
     setSelectedJobId(job.id)
     setSelectedJob(job)
@@ -219,10 +283,8 @@ export default function AdminView({ userEmail }: { userEmail: string }) {
       .eq('job_id', job.id)
       .order('created_at', { ascending: false })
 
-    type AppResponse = {
-        id: number; user_id: string; status: string; message: string; created_at: string;
-        user: { email: string; current_rank: string; total_xp: number } | null
-    }
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    type AppResponse = any // 簡易対応
     
     const formattedApplicants: Applicant[] = ((appData as unknown) as AppResponse[] || []).map((app) => ({
       id: app.id,
@@ -278,7 +340,6 @@ export default function AdminView({ userEmail }: { userEmail: string }) {
       })
       if (error) throw error
       
-      // 2. ★追加: 全員に通知を送る (エラーが出てもクエスト作成自体は成功扱いにするため try-catch を分けるのがベター)
       try {
         await fetch('/api/admin/broadcast', {
           method: 'POST',
@@ -286,7 +347,7 @@ export default function AdminView({ userEmail }: { userEmail: string }) {
           body: JSON.stringify({
             title: '新着クエスト！',
             body: `新しい募集「${newJob.title}」が公開されました。報酬: ${rewardFormatted}`,
-            url: '/mypage?tab=quests' // クエストタブを開くように誘導
+            url: '/mypage?tab=quests' 
           })
         })
       } catch (notifyError) {
@@ -388,9 +449,6 @@ export default function AdminView({ userEmail }: { userEmail: string }) {
 
   const handleSaveNews = async (e: React.FormEvent) => {
     e.preventDefault()
-    alert("🔥 コードは更新されています！保存処理を開始します。")
-    console.log("★ handleSaveNews 開始") // ログ追加
-
     setIsNewsSubmitting(true)
     const saveData = { title: newsForm.title, link_url: newsForm.link_url || null, content: newsForm.content || null, source_name: newsForm.source_name || 'お知らせ', image_url: newsForm.image_url || null, published_at: undefined as string | undefined }
     
@@ -398,14 +456,10 @@ export default function AdminView({ userEmail }: { userEmail: string }) {
       if (editingNewsId) {
         // ... (編集処理)
       } else {
-        console.log("★ 新規作成処理 開始") // ログ追加
         saveData.published_at = new Date().toISOString()
         const { error } = await supabase.from('news_feeds').insert(saveData)
         if (error) throw error;
         
-        console.log("★ DB保存成功。通知APIを呼び出します...") // ログ追加
-
-        // --- 通知送信 (Broadcast API) ---
         const res = await fetch('/api/admin/broadcast', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
@@ -415,14 +469,12 @@ export default function AdminView({ userEmail }: { userEmail: string }) {
             url: '/mypage?tab=info'
           })
         })
-        console.log("★ 通知API応答ステータス:", res.status) // ログ追加
-        // -----------------------------
+        console.log("★ 通知API応答ステータス:", res.status)
 
         alert('作成しました')
       }
       void fetchNews(); setActiveView('news_list')
     } catch (e: unknown) {
-      console.error("★ エラー発生:", e) // エラー詳細を表示
       if (e instanceof Error) alert('エラー: ' + e.message) 
     } finally { setIsNewsSubmitting(false) }
   }
@@ -470,7 +522,6 @@ export default function AdminView({ userEmail }: { userEmail: string }) {
 
     setIsScoutSending(true)
     try {
-      // 1. DB保存
       const insertData = scoutForm.targetUserIds.map(uid => ({
         user_id: uid,
         job_id: Number(scoutForm.jobId),
@@ -482,11 +533,8 @@ export default function AdminView({ userEmail }: { userEmail: string }) {
       const { error } = await supabase.from('scouts').insert(insertData)
       if (error) throw error
       
-      // 2. ★通知送信
-      // クエスト名を取得
       const jobTitle = jobs.find(j => j.id.toString() === scoutForm.jobId)?.title || 'クエスト'
 
-      // 人数分ループして送信（Promise.allで並列処理）
       await Promise.all(scoutForm.targetUserIds.map(userId => 
         fetch('/api/admin/push', {
           method: 'POST',
@@ -511,7 +559,6 @@ export default function AdminView({ userEmail }: { userEmail: string }) {
   }
 
   const handleSendPush = async (userId: string, userName: string) => {
-  // 簡易的にpromptでタイトルと本文を入力
     const title = prompt(`${userName} さんへの通知タイトルを入力してください`, 'しずおかコネクト');
     if (title === null) return;
 
@@ -522,7 +569,7 @@ export default function AdminView({ userEmail }: { userEmail: string }) {
       const res = await fetch('/api/admin/push', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ userId, title, body }) // ★内容を送信
+        body: JSON.stringify({ userId, title, body })
       })
     
       const data = await res.json()
@@ -553,7 +600,6 @@ export default function AdminView({ userEmail }: { userEmail: string }) {
       const { data: { user } } = await supabase.auth.getUser()
       if (!user) throw new Error('Auth error')
       
-      // ★以前の直接insert処理を削除し、API呼び出しに変更
       const res = await fetch('/api/chat/send', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
@@ -561,13 +607,12 @@ export default function AdminView({ userEmail }: { userEmail: string }) {
           ApplicationId: activeChatApplicant.id,
           senderId: user.id,
           content: chatInput.trim(),
-          isFromAdmin: true // 管理者フラグ
+          isFromAdmin: true 
         })
       })
 
       if (!res.ok) throw new Error('送信に失敗しました')
 
-      // 画面更新
       const newMsg = { id: Date.now(), content: chatInput.trim(), sender_id: user.id, created_at: new Date().toISOString() }
       setChatMessages(prev => [...prev, newMsg]); setChatInput('')
       setTimeout(() => messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' }), 100)
@@ -597,10 +642,13 @@ export default function AdminView({ userEmail }: { userEmail: string }) {
             <button onClick={() => setActiveView('user_search')} className={`text-left px-6 py-4 font-bold text-sm flex gap-3 whitespace-nowrap ${activeView === 'user_search' ? 'bg-blue-50 text-blue-600 md:border-l-4 md:border-b-0 border-b-4 border-blue-600' : 'text-gray-600 hover:bg-gray-50'}`}><span>🔍</span> ユーザー・スカウト</button>
             <button onClick={() => setActiveView('news_list')} className={`text-left px-6 py-4 font-bold text-sm flex gap-3 whitespace-nowrap ${['news_list', 'edit_news'].includes(activeView) ? 'bg-blue-50 text-blue-600 md:border-l-4 md:border-b-0 border-b-4 border-blue-600' : 'text-gray-600 hover:bg-gray-50'}`}><span>📢</span> お知らせ管理</button>
             <button onClick={() => setActiveView('qr')} className={`text-left px-6 py-4 font-bold text-sm flex gap-3 whitespace-nowrap ${activeView === 'qr' ? 'bg-blue-50 text-blue-600 md:border-l-4 md:border-b-0 border-b-4 border-blue-600' : 'text-gray-600 hover:bg-gray-50'}`}><span>🎟️</span> QR発行</button>
+            {/* ★ 追加: レポート管理メニュー */}
+            <button onClick={() => setActiveView('reports')} className={`text-left px-6 py-4 font-bold text-sm flex gap-3 whitespace-nowrap ${activeView === 'reports' ? 'bg-blue-50 text-blue-600 md:border-l-4 md:border-b-0 border-b-4 border-blue-600' : 'text-gray-600 hover:bg-gray-50'}`}><span>📝</span> レポート管理</button>
           </nav>
 
           <main className="flex-1 bg-white rounded-xl shadow-sm border border-gray-200 min-h-[600px] p-4 sm:p-6 relative w-full overflow-hidden">
             
+            {/* ... (Existing Views: job_list, job_detail, create_job, news_list, edit_news, user_search) ... */}
             {activeView === 'job_list' && (
                <div className="animate-fade-in-up">
                 <h2 className="text-xl font-bold text-gray-800 mb-6">求人リスト</h2>
@@ -882,25 +930,19 @@ export default function AdminView({ userEmail }: { userEmail: string }) {
                           </td>
 
                           <td className="px-6 py-4 text-right">
-                              {/* ★ flexコンテナを追加してボタンを横並びにする */}
                               <div className="flex justify-end gap-2">
-      
-                               {/* ★追加する通知ボタン */}
                               <button 
                                 onClick={() => handleSendPush(user.id, user.username || 'No Name')}
                                 className="bg-orange-500 text-white px-3 py-1.5 rounded text-xs font-bold hover:bg-orange-600 shadow-sm whitespace-nowrap"
                               >
                                 🔔 通知
                               </button>
-
-                              {/* 既存のスカウトボタン */}
                               <button 
                                 onClick={() => openScoutModal([user])}
                                 className="bg-indigo-600 text-white px-3 py-1.5 rounded text-xs font-bold hover:bg-indigo-700 shadow-sm whitespace-nowrap"
                               >
                                 個別スカウト
                              </button>
-      
                            </div>
                          </td>
                         </tr>
@@ -936,6 +978,88 @@ export default function AdminView({ userEmail }: { userEmail: string }) {
               </div>
             )}
 
+            {/* ★ 追加: レポート管理ビュー */}
+            {activeView === 'reports' && (
+              <div className="animate-fade-in-up">
+                <h2 className="text-xl font-bold text-gray-800 mb-6">イベント参加レポート</h2>
+                
+                {/* フィルタリングUI */}
+                <div className="bg-gray-50 p-4 rounded-xl border border-gray-200 mb-6">
+                  <label className="block text-xs font-bold text-gray-500 mb-1">イベントで絞り込み</label>
+                  <select 
+                    className="w-full p-2 border border-gray-300 rounded text-sm"
+                    value={reportFilterEventId}
+                    onChange={(e) => setReportFilterEventId(e.target.value === 'all' ? 'all' : Number(e.target.value))}
+                  >
+                    <option value="all">全てのイベント</option>
+                    {events.map(ev => (
+                      <option key={ev.id} value={ev.id}>{ev.event_date} : {ev.title}</option>
+                    ))}
+                  </select>
+                </div>
+
+                {/* イベントごとのレポート表示 */}
+                <div className="space-y-8">
+                  {events
+                    .filter(ev => reportFilterEventId === 'all' || ev.id === reportFilterEventId)
+                    .map(event => {
+                      const eventReports = reports.filter(r => r.participation.event_id === event.id)
+                      if (eventReports.length === 0) return null
+
+                      return (
+                        <div key={event.id} className="bg-white border border-gray-200 rounded-xl shadow-sm overflow-hidden">
+                          <div className="bg-slate-100 px-4 py-3 border-b border-slate-200 flex justify-between items-center">
+                            <h3 className="font-bold text-gray-800 text-sm">
+                              {event.title} 
+                              <span className="text-xs font-normal text-gray-500 ml-2">({event.event_date})</span>
+                            </h3>
+                            <span className="bg-white px-2 py-0.5 rounded text-xs font-bold text-slate-600 border border-slate-200">
+                              {eventReports.length} 件
+                            </span>
+                          </div>
+                          <div className="p-4 grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4 bg-slate-50/50">
+                            {eventReports.map(report => (
+                              <div key={report.id} className="bg-white p-4 rounded-lg border border-gray-100 shadow-sm flex flex-col h-full">
+                                <div className="flex items-center gap-2 mb-3">
+                                  <div className="w-8 h-8 rounded-full bg-gray-200 overflow-hidden flex-shrink-0">
+                                    {report.user.avatar_url ? (
+                                      // eslint-disable-next-line @next/next/no-img-element
+                                      <img src={report.user.avatar_url} alt="User" className="w-full h-full object-cover" />
+                                    ) : (
+                                      <div className="w-full h-full flex items-center justify-center text-gray-500 text-xs font-bold">
+                                        {(report.user.username || report.user.email)[0].toUpperCase()}
+                                      </div>
+                                    )}
+                                  </div>
+                                  <div className="min-w-0">
+                                    <div className="text-xs font-bold text-gray-800 truncate">{report.user.username || 'No Name'}</div>
+                                    <div className="text-[10px] text-gray-400 truncate">{report.user.email}</div>
+                                  </div>
+                                  <div className="ml-auto text-yellow-400 text-sm">
+                                    {'★'.repeat(report.rating)}<span className="text-gray-200">{'★'.repeat(5 - report.rating)}</span>
+                                  </div>
+                                </div>
+                                <div className="flex-grow">
+                                  <p className="text-sm text-gray-700 whitespace-pre-wrap leading-relaxed">{report.content}</p>
+                                </div>
+                                <div className="mt-3 pt-3 border-t border-gray-50 flex justify-between items-end">
+                                   <div className="text-[10px] text-gray-400">{new Date(report.created_at).toLocaleString()}</div>
+                                   <div className="text-[10px] font-bold text-green-600 bg-green-50 px-2 py-0.5 rounded">+{report.xp_bonus} XP</div>
+                                </div>
+                              </div>
+                            ))}
+                          </div>
+                        </div>
+                      )
+                    })}
+                   {reports.filter(r => reportFilterEventId === 'all' || r.participation.event_id === reportFilterEventId).length === 0 && (
+                      <div className="text-center p-8 text-gray-400 border border-dashed rounded-xl">レポートはまだありません</div>
+                   )}
+                </div>
+              </div>
+            )}
+
+            {/* ... (Existing Views: scoutForm modal, activeChatApplicant modal) ... */}
             {scoutForm.targetUserIds.length > 0 && (
               <div className="fixed inset-0 bg-black/50 z-50 flex items-center justify-center p-4">
                  <div className="bg-white rounded-xl shadow-2xl w-full max-w-md overflow-hidden animate-fade-in-up">

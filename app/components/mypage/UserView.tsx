@@ -9,7 +9,9 @@ import NotificationManager from '../NotificationManager'
 import OnboardingModal from '../OnboardingModal' // ★追加: オンボーディングモーダル
 
 const EXTERNAL_SITE_URL = 'https://hamamtsu-events.shizuoka-connect.com'
+const SHIZUOKA_CONNECT_POSTER_ID = '5ef710d4-3583-4ff9-a010-ddec40616767'
 
+// ... (中略)
 type Profile = {
   id: string
   email: string
@@ -269,14 +271,16 @@ export default function UserView({ userId, userEmail }: { userId: string, userEm
       setNews(newsData || [])
 
       const todayStr = new Date().toISOString().split('T')[0]
+// 修正箇所: fetchEvents 内のクエリ
       const { data: eventsData } = await eventSupabase
         .from('events')
         .select('*')
+        // ★修正: パートナー主催 OR しずおかコネクト主催 のいずれか
+        .or(`is_partner_hosted.eq.true,poster_id.eq.${SHIZUOKA_CONNECT_POSTER_ID}`)
         .gte('event_date', todayStr)
         .order('event_date', { ascending: true })
         .limit(21)
         .returns<ExternalEvent[]>()
-      
       const events = eventsData || []
       if (events.length > 20) {
         setHasMoreEvents(true)
@@ -332,20 +336,27 @@ export default function UserView({ userId, userEmail }: { userId: string, userEm
         <button
           key={day}
           onClick={() => setSelectedDateStr(dateStr)}
-          className={`h-14 flex flex-col items-center justify-start pt-1 rounded-lg border transition-all relative ${
-            isSelected 
-              ? 'bg-blue-600 text-white border-blue-600 shadow-md transform scale-105 z-10' 
-              : isToday
-                ? 'bg-blue-50 text-blue-600 border-blue-200 font-bold'
-                : 'bg-white text-gray-700 border-gray-100 hover:bg-gray-50'
-          }`}
+          className={`... (クラス名は変更なし) ...`}
         >
           <span className={`text-xs ${isSelected ? 'font-bold' : ''}`}>{day}</span>
           {hasEvent && (
             <div className="mt-1 flex gap-0.5 justify-center flex-wrap px-1">
-              {dayEvents.slice(0, 3).map((_, i) => (
-                <div key={i} className={`w-1.5 h-1.5 rounded-full ${isSelected ? 'bg-white' : 'bg-orange-400'}`}></div>
-              ))}
+              {dayEvents.slice(0, 3).map((ev, i) => {
+                // ★修正: 主催者によって色を変える
+                const isOfficial = ev.poster_id === SHIZUOKA_CONNECT_POSTER_ID
+                return (
+                  <div 
+                    key={i} 
+                    className={`w-1.5 h-1.5 rounded-full ${
+                      isSelected 
+                        ? 'bg-white' 
+                        : isOfficial 
+                          ? 'bg-orange-400' // 公式: オレンジ (目立つ)
+                          : 'bg-green-400'  // 提携: 緑 (親しみやすい)
+                    }`}
+                  ></div>
+                )
+              })}
               {dayEvents.length > 3 && <span className="text-[8px] leading-none text-gray-400">+</span>}
             </div>
           )}
@@ -579,32 +590,65 @@ export default function UserView({ userId, userEmail }: { userId: string, userEm
     )
   }
 
+// EventGridコンポーネントを修正
+
   const EventGrid = ({ events, showMore }: { events: ExternalEvent[], showMore: boolean }) => (
     <>
       <div className="grid grid-cols-2 gap-3">
-        {events.map((ev) => (
-          <a key={ev.id} href={`${EXTERNAL_SITE_URL}/events/${ev.id}`} target="_blank" rel="noopener noreferrer" className="group relative overflow-hidden rounded-xl bg-white shadow-sm border border-gray-100 hover:border-blue-300 transition-all flex flex-col h-full active:scale-95">
-            <div className="aspect-[4/3] w-full bg-gray-100 relative">
-              {ev.image_url ? (
-                // eslint-disable-next-line @next/next/no-img-element
-                <img src={ev.image_url} alt={ev.title} className="h-full w-full object-cover transition-transform duration-500 group-hover:scale-105" />
-              ) : (
-                <div className="flex h-full w-full items-center justify-center text-gray-300 bg-gray-50"><span className="text-[10px] font-bold">No Image</span></div>
-              )}
-              <div className="absolute top-2 left-2 bg-white/90 backdrop-blur-sm px-2 py-0.5 rounded text-[10px] font-bold text-gray-700 shadow-sm">{new Date(ev.event_date).toLocaleDateString()}</div>
-            </div>
-            <div className="p-3 flex flex-col flex-grow">
-              <h3 className="line-clamp-2 text-xs font-bold text-gray-800 leading-snug mb-1 group-hover:text-blue-600 transition-colors">{ev.title}</h3>
-              <div className="mt-auto flex items-center gap-1 text-[10px] text-gray-400"><Icons.ExternalLink /><span>詳細を見る</span></div>
-            </div>
-          </a>
-        ))}
+        {events.map((ev) => {
+          // ★追加: 判定ロジック
+          const isOfficial = ev.poster_id === SHIZUOKA_CONNECT_POSTER_ID
+          
+          return (
+            <a key={ev.id} href={`${EXTERNAL_SITE_URL}/events/${ev.id}`} target="_blank" rel="noopener noreferrer" className="group relative overflow-hidden rounded-xl bg-white shadow-sm border border-gray-100 hover:border-blue-300 transition-all flex flex-col h-full active:scale-95">
+              <div className="aspect-[4/3] w-full bg-gray-100 relative">
+                {ev.image_url ? (
+                  // eslint-disable-next-line @next/next/no-img-element
+                  <img src={ev.image_url} alt={ev.title} className="h-full w-full object-cover transition-transform duration-500 group-hover:scale-105" />
+                ) : (
+                  <div className="flex h-full w-full items-center justify-center text-gray-300 bg-gray-50"><span className="text-[10px] font-bold">No Image</span></div>
+                )}
+                
+                {/* ★追加: 左上の日付バッジ (既存) */}
+                <div className="absolute top-2 left-2 bg-white/90 backdrop-blur-sm px-2 py-0.5 rounded text-[10px] font-bold text-gray-700 shadow-sm">
+                  {new Date(ev.event_date).toLocaleDateString()}
+                </div>
+
+                {/* ★追加: 右上の種別バッジ */}
+                <div className={`absolute top-2 right-2 px-2 py-0.5 rounded text-[10px] font-bold text-white shadow-sm ${
+                  isOfficial ? 'bg-orange-500' : 'bg-green-500'
+                }`}>
+                  {isOfficial ? '公式 (XP対象)' : '提携イベント'}
+                </div>
+              </div>
+              
+              <div className="p-3 flex flex-col flex-grow">
+                <h3 className="line-clamp-2 text-xs font-bold text-gray-800 leading-snug mb-1 group-hover:text-blue-600 transition-colors">
+                  {ev.title}
+                </h3>
+                
+                {/* ★追加: 下部に補足テキスト */}
+                <div className="mt-auto">
+                   <div className="flex items-center gap-1 text-[10px] text-gray-400 mb-1">
+                      <Icons.ExternalLink /><span>詳細を見る</span>
+                   </div>
+                   {!isOfficial && (
+                     <p className="text-[10px] text-green-600 bg-green-50 inline-block px-1 rounded">
+                       ※チェックイン対象外
+                     </p>
+                   )}
+                </div>
+              </div>
+            </a>
+          )
+        })}
       </div>
       {showMore && (
         <a href={EXTERNAL_SITE_URL} target="_blank" rel="noopener noreferrer" className="mt-4 block w-full py-3 text-center bg-gray-50 text-blue-600 text-sm font-bold rounded-xl border border-gray-200 hover:bg-blue-50 transition-colors">イベントをもっと見る →</a>
       )}
     </>
   )
+
 
   if (loading) return <div className="min-h-screen flex items-center justify-center bg-gray-50"><div className="animate-pulse w-10 h-10 border-4 border-gray-200 border-t-blue-600 rounded-full animate-spin"></div></div>
 
