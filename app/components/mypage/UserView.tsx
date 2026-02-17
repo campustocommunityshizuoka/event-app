@@ -186,6 +186,11 @@ export default function UserView({ userId, userEmail }: { userId: string, userEm
 
   const [hiddenAppIds, setHiddenAppIds] = useState<number[]>([])
 
+  // ▼▼▼ カレンダー用に追加するState ▼▼▼
+  const [currentDate, setCurrentDate] = useState(new Date()) // 表示中の年月
+  const [selectedDateStr, setSelectedDateStr] = useState<string>(new Date().toISOString().split('T')[0]) // 選択中の日付 (YYYY-MM-DD)
+  // ▲▲▲ 追加ここまで ▲▲▲
+
   useEffect(() => {
     const init = async () => {
       const storedHidden = localStorage.getItem('hidden_quest_results')
@@ -281,10 +286,104 @@ export default function UserView({ userId, userEmail }: { userId: string, userEm
         setUpcomingEvents(events)
       }
 
+
+
       setLoading(false)
     }
     init()
   }, [userId, userEmail])
+
+    const getDaysInMonth = (year: number, month: number) => new Date(year, month + 1, 0).getDate()
+    const getFirstDayOfMonth = (year: number, month: number) => new Date(year, month, 1).getDay()
+
+    const handlePrevMonth = () => {
+     setCurrentDate(new Date(currentDate.getFullYear(), currentDate.getMonth() - 1, 1))
+     setSelectedDateStr('') // 月移動時は選択解除（または1日にする等）
+    }
+    const handleNextMonth = () => {
+     setCurrentDate(new Date(currentDate.getFullYear(), currentDate.getMonth() + 1, 1))
+     setSelectedDateStr('')
+    }
+
+
+  // カレンダーレンダリング関数
+  const renderCalendar = () => {
+    const year = currentDate.getFullYear()
+    const month = currentDate.getMonth() // 0-indexed
+    const daysInMonth = getDaysInMonth(year, month)
+    const firstDay = getFirstDayOfMonth(year, month)
+
+    const days = []
+    // 空白セル (先月分)
+    for (let i = 0; i < firstDay; i++) {
+      days.push(<div key={`empty-${i}`} className="h-14 bg-transparent"></div>)
+    }
+
+    // 日付セル
+    for (let day = 1; day <= daysInMonth; day++) {
+      const dateStr = `${year}-${String(month + 1).padStart(2, '0')}-${String(day).padStart(2, '0')}`
+      // その日にイベントがあるかチェック
+      const dayEvents = upcomingEvents.filter(e => e.event_date === dateStr)
+      const hasEvent = dayEvents.length > 0
+      const isSelected = selectedDateStr === dateStr
+      const isToday = dateStr === new Date().toISOString().split('T')[0]
+
+      days.push(
+        <button
+          key={day}
+          onClick={() => setSelectedDateStr(dateStr)}
+          className={`h-14 flex flex-col items-center justify-start pt-1 rounded-lg border transition-all relative ${
+            isSelected 
+              ? 'bg-blue-600 text-white border-blue-600 shadow-md transform scale-105 z-10' 
+              : isToday
+                ? 'bg-blue-50 text-blue-600 border-blue-200 font-bold'
+                : 'bg-white text-gray-700 border-gray-100 hover:bg-gray-50'
+          }`}
+        >
+          <span className={`text-xs ${isSelected ? 'font-bold' : ''}`}>{day}</span>
+          {hasEvent && (
+            <div className="mt-1 flex gap-0.5 justify-center flex-wrap px-1">
+              {dayEvents.slice(0, 3).map((_, i) => (
+                <div key={i} className={`w-1.5 h-1.5 rounded-full ${isSelected ? 'bg-white' : 'bg-orange-400'}`}></div>
+              ))}
+              {dayEvents.length > 3 && <span className="text-[8px] leading-none text-gray-400">+</span>}
+            </div>
+          )}
+        </button>
+      )
+    }
+
+    return (
+      <div className="bg-white rounded-xl shadow-sm border border-gray-200 p-4 mb-6 select-none">
+        {/* カレンダーヘッダー */}
+        <div className="flex justify-between items-center mb-4">
+          <button onClick={handlePrevMonth} className="p-2 hover:bg-gray-100 rounded-full text-gray-500">
+             &lt;
+          </button>
+          <h3 className="font-bold text-lg text-gray-800">
+            {year}年 {month + 1}月
+          </h3>
+          <button onClick={handleNextMonth} className="p-2 hover:bg-gray-100 rounded-full text-gray-500">
+             &gt;
+          </button>
+        </div>
+        
+        {/* 曜日ヘッダー */}
+        <div className="grid grid-cols-7 gap-1 mb-2 text-center">
+          {['日', '月', '火', '水', '木', '金', '土'].map((d, i) => (
+            <div key={d} className={`text-xs font-bold ${i === 0 ? 'text-red-400' : i === 6 ? 'text-blue-400' : 'text-gray-400'}`}>
+              {d}
+            </div>
+          ))}
+        </div>
+
+        {/* 日付グリッド */}
+        <div className="grid grid-cols-7 gap-1">
+          {days}
+        </div>
+      </div>
+    )
+  }
 
   const openChat = async (app: MyApplication) => {
     setActiveChatApp(app)
@@ -668,13 +767,60 @@ export default function UserView({ userId, userEmail }: { userId: string, userEm
           </div>
         )}
 
+{/* ▼▼▼ activeTab === 'events' の部分を差し替え ▼▼▼ */}
         {activeTab === 'events' && (
           <div className="animate-fade-in-up">
-            <h2 className="text-xl font-bold text-gray-800 mb-4 px-1">イベントを探す</h2>
-            <p className="text-xs text-gray-500 mb-4 px-1">気になるイベントをクリックして詳細をチェック！<br/>会場でQRコードを読み取るとXPを獲得できます。</p>
-            {upcomingEvents.length === 0 ? (<div className="p-10 text-center text-gray-400 bg-white rounded-xl border border-dashed border-gray-300"><p className="text-4xl mb-2">📭</p><p className="text-sm">現在予定されているイベントはありません</p></div>) : (<EventGrid events={upcomingEvents} showMore={hasMoreEvents} />)}
+            <h2 className="text-xl font-bold text-gray-800 mb-4 px-1">イベントカレンダー</h2>
+            <p className="text-xs text-gray-500 mb-4 px-1">
+              日付をタップして開催されるイベントを確認しよう！
+            </p>
+            
+            {/* カレンダー表示 */}
+            {renderCalendar()}
+
+            {/* 選択された日付のイベントリスト */}
+            <div className="space-y-3">
+              <div className="flex items-center gap-2 mb-2 px-1">
+                <span className="text-lg">📅</span>
+                <h3 className="font-bold text-gray-700">
+                  {selectedDateStr ? `${new Date(selectedDateStr).getMonth() + 1}月${new Date(selectedDateStr).getDate()}日のイベント` : '日付を選択してください'}
+                </h3>
+              </div>
+
+              {selectedDateStr ? (
+                (() => {
+                  const targetEvents = upcomingEvents.filter(e => e.event_date === selectedDateStr)
+                  if (targetEvents.length === 0) {
+                    return (
+                      <div className="p-8 text-center text-gray-400 bg-white rounded-xl border border-dashed border-gray-300 text-sm">
+                        予定されているイベントはありません
+                      </div>
+                    )
+                  }
+                  return <EventGrid events={targetEvents} showMore={false} />
+                })()
+              ) : (
+                <div className="p-6 text-center text-gray-400 text-xs">
+                  カレンダーの日付をタップすると詳細が表示されます
+                </div>
+              )}
+              
+              {/* 全イベント表示へのリンク (カレンダーで見逃す可能性への配慮) */}
+              <div className="mt-6 pt-6 border-t border-gray-200 text-center">
+                <p className="text-xs text-gray-400 mb-2">直近のイベント一覧はこちら</p>
+                <button 
+                  onClick={() => setSelectedDateStr('')} // 選択解除で見せる等のロジックにするか、そのままEventGridを表示
+                  className="hidden text-xs text-blue-600 font-bold underline"
+                >
+                  リスト形式で見る
+                </button>
+                {/* 常に下に「近日開催の全イベント」を出しても良いが、今回はカレンダーメインにするため省略 */}
+              </div>
+            </div>
           </div>
         )}
+        {/* ▲▲▲ 差し替えここまで ▲▲▲ */}
+
 
         {activeTab === 'quests' && (
           <div className="animate-fade-in-up space-y-8">

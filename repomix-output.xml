@@ -55,6 +55,7 @@ app/checkin/page.tsx
 app/components/mypage/AdminView.tsx
 app/components/mypage/UserView.tsx
 app/components/NotificationManager.tsx
+app/components/OnboardingModal.tsx
 app/components/ServiceWorkerRegister.tsx
 app/globals.css
 app/jobs/[id]/page.tsx
@@ -348,137 +349,6 @@ export default function AdminPage() {
 }
 </file>
 
-<file path="app/api/admin/broadcast/route.ts">
-import { createClient } from '@supabase/supabase-js'
-import { NextResponse } from 'next/server'
-import { sendPushNotification } from '../../../utils/push'
-
-export const runtime = 'edge'
-
-export async function POST(request: Request) {
-  try {
-    const { title, body, url } = await request.json()
-    console.log("--- Broadcast Request ---", title)
-
-    const supabase = createClient(
-      process.env.NEXT_PUBLIC_SUPABASE_URL!,
-      process.env.SUPABASE_SERVICE_ROLE_KEY!
-    )
-
-    // 1. 全ユーザーのIDを取得 (重複を排除)
-    const { data: subs, error } = await supabase
-      .from('push_subscriptions')
-      .select('user_id')
-    
-    if (error) throw error
-    if (!subs || subs.length === 0) {
-      return NextResponse.json({ success: true, count: 0, message: 'No subscribers' })
-    }
-
-    // Setを使ってユーザーIDの重複を取り除く
-    const uniqueUserIds = [...new Set(subs.map(s => s.user_id))]
-    console.log(`Broadcasting to ${uniqueUserIds.length} users...`)
-
-    // 2. ループして全員に送信
-    // (人数が多い場合は時間がかかるため、本来はバックグラウンドジョブが望ましいですが、一旦ループで処理)
-    let successCount = 0
-    
-    // 並列処理で高速化
-    const promises = uniqueUserIds.map(userId => 
-      sendPushNotification(userId, title, body, url || '/mypage')
-        .then(res => res.success ? 1 : 0)
-    )
-
-    const results = await Promise.all(promises)
-    successCount = results.reduce((a, b) => a + b, 0)
-
-    console.log(`Broadcast Complete. Success count: ${successCount}`)
-    return NextResponse.json({ success: true, count: successCount })
-
-  } catch (err: any) {
-    console.error("Broadcast Error:", err)
-    return NextResponse.json({ success: false, error: err.message }, { status: 500 })
-  }
-}
-</file>
-
-<file path="app/api/admin/push/route.ts">
-import { NextResponse } from 'next/server'
-import { sendPushNotification } from '../../../utils/push' // 作成した部品を読み込み
-
-export const runtime = 'edge'
-
-export async function POST(request: Request) {
-  try {
-    const { userId, title, body } = await request.json()
-    console.log("--- Manual Push Request ---")
-    console.log(`Target: ${userId}, Title: ${title}`)
-
-    if (!userId || !title) {
-      return NextResponse.json({ success: false, message: 'Missing userId or title' }, { status: 400 })
-    }
-
-    // 部品を使って送信
-    const result = await sendPushNotification(userId, title, body || 'お知らせがあります')
-
-    return NextResponse.json(result)
-  } catch (err: any) {
-    console.error("Manual Push API Error:", err)
-    return NextResponse.json({ success: false, error: err.message }, { status: 500 })
-  }
-}
-</file>
-
-<file path="app/api/chat/send/route.ts">
-import { createClient } from '@supabase/supabase-js'
-import { NextResponse } from 'next/server'
-import { sendPushNotification } from '../../../utils/push'
-
-export const runtime = 'edge'
-
-export async function POST(request: Request) {
-  try {
-    const { ApplicationId, senderId, content, isFromAdmin } = await request.json()
-
-    const supabase = createClient(
-      process.env.NEXT_PUBLIC_SUPABASE_URL!,
-      process.env.SUPABASE_SERVICE_ROLE_KEY!
-    )
-
-    // DB保存
-    const { error: insertError } = await supabase
-      .from('application_messages')
-      .insert({ application_id: ApplicationId, sender_id: senderId, content: content })
-
-    if (insertError) throw insertError
-
-    // 相手を特定して通知
-    if (isFromAdmin) {
-      // 応募情報を取得してユーザーIDを特定
-      const { data: appData } = await supabase
-        .from('job_applications')
-        .select('user_id, job:jobs(title)')
-        .eq('id', ApplicationId)
-        .single()
-      
-      if (appData) {
-        // @ts-ignore
-        const jobTitle = appData.job?.title || 'クエスト'
-        await sendPushNotification(
-          appData.user_id,
-          `新着メッセージ: ${jobTitle}`,
-          `運営から: ${content.substring(0, 30)}...`
-        )
-      }
-    }
-
-    return NextResponse.json({ success: true })
-  } catch (err: any) {
-    return NextResponse.json({ success: false, error: err.message }, { status: 500 })
-  }
-}
-</file>
-
 <file path="app/api/push/get-message/route.ts">
 import { createClient } from '@supabase/supabase-js'
 import { NextResponse } from 'next/server'
@@ -551,72 +421,6 @@ export async function GET(request: Request) {
     const message = err instanceof Error ? err.message : 'Unknown error'
     console.error("Server Error in get-message:", message)
     return NextResponse.json({ title: '通知', body: 'お知らせがあります' }, { status: 500 })
-  }
-}
-</file>
-
-<file path="app/api/save-subscription/route.ts">
-// app/api/save-subscription/route.ts
-import { createClient } from '@supabase/supabase-js'
-import { NextResponse } from 'next/server'
-
-export const runtime = 'edge'
-
-export async function POST(request: Request) {
-  try {
-    const { subscription } = await request.json()
-    
-    // --- デバッグログ ---
-    console.log("--- Debug Save Subscription ---")
-    
-    // 1. クライアント作成
-    const supabase = createClient(
-      process.env.NEXT_PUBLIC_SUPABASE_URL!,
-      process.env.SUPABASE_SERVICE_ROLE_KEY!,
-    )
-    
-    // 2. ユーザー認証
-    const authHeader = request.headers.get('Authorization')
-    if (!authHeader) {
-        console.error("Error: No Authorization header")
-        return NextResponse.json({ success: false, message: 'No Auth Header' }, { status: 401 })
-    }
-
-    const token = authHeader.replace('Bearer ', '')
-    const { data: { user }, error: authError } = await supabase.auth.getUser(token)
-    
-    if (authError || !user) {
-        console.error("Auth Error:", authError?.message)
-        return NextResponse.json({ success: false, message: 'User Auth Failed' }, { status: 401 })
-    }
-    
-    console.log("User Identified:", user.id)
-
-    // 3. DB保存
-    const { error: insertError } = await supabase
-        .from('push_subscriptions')
-        .insert({
-            user_id: user.id,
-            subscription: subscription
-        })
-    
-    if (insertError) {
-        // すでに登録済み(重複)の場合はエラーにしない
-        if (insertError.message.includes('unique constraint') || insertError.code === '23505') {
-            console.log("Info: Already subscribed (Duplicate skipped)")
-            return NextResponse.json({ success: true, status: 'already_exists' })
-        }
-        
-        console.error("Insert Error (Details):", insertError)
-        return NextResponse.json({ success: false, message: insertError.message }, { status: 500 })
-    }
-
-    console.log("Success: Subscription saved to DB")
-    return NextResponse.json({ success: true })
-
-  } catch (err: any) {
-    console.error("Server Error:", err)
-    return NextResponse.json({ success: false, error: err.message }, { status: 500 })
   }
 }
 </file>
@@ -730,6 +534,195 @@ export default function AuthErrorPage() {
     <Suspense fallback={<div className="min-h-[100dvh] flex items-center justify-center bg-gray-50">Loading...</div>}>
       <AuthErrorContent />
     </Suspense>
+  )
+}
+</file>
+
+<file path="app/components/OnboardingModal.tsx">
+'use client'
+
+import { useState, useEffect } from 'react'
+
+export default function OnboardingModal() {
+  const [isOpen, setIsOpen] = useState(false)
+  const [step, setStep] = useState(1) // 1:概要, 2:規約, 3:PWA
+  const [isAgreed, setIsAgreed] = useState(false)
+  const [isIOS, setIsIOS] = useState(false)
+
+  useEffect(() => {
+    // 1. 過去に表示済みかチェック
+    const hasSeen = localStorage.getItem('has_seen_onboarding_v1')
+    
+    if (!hasSeen) {
+      // iOS判定 (表示が必要な場合のみチェック)
+      const userAgent = window.navigator.userAgent.toLowerCase()
+      const isIosDevice = /iphone|ipad|ipod/.test(userAgent)
+
+      // ★修正箇所: setTimeoutでラップして非同期にする（エラー回避）
+      setTimeout(() => {
+        if (isIosDevice) {
+          setIsIOS(true)
+        }
+        setIsOpen(true)
+      }, 0)
+    }
+  }, [])
+
+  const handleNext = () => {
+    setStep(prev => prev + 1)
+  }
+
+  const handleComplete = () => {
+    localStorage.setItem('has_seen_onboarding_v1', 'true')
+    setIsOpen(false)
+  }
+
+  if (!isOpen) return null
+
+  return (
+    <div className="fixed inset-0 z-[100] flex items-center justify-center p-4 bg-black/60 backdrop-blur-sm animate-fade-in">
+      <div className="bg-white rounded-2xl w-full max-w-sm overflow-hidden shadow-2xl animate-fade-in-up">
+        
+        {/* --- ステップ1: アプリ概要 --- */}
+        {step === 1 && (
+          <div className="p-6 text-center">
+            <div className="w-16 h-16 bg-blue-100 rounded-full flex items-center justify-center mx-auto mb-4 text-3xl">
+              👋
+            </div>
+            <h2 className="text-xl font-bold text-gray-800 mb-4">
+              しずおかコネクトへ<br/>ようこそ！
+            </h2>
+            <p className="text-sm text-gray-600 leading-relaxed mb-6">
+              このアプリは、静岡の地域活動とあなたをつなぐプラットフォームです。<br/><br/>
+              イベントに参加してQRコードでチェックインしたり、クエストに挑戦してランクを上げましょう！
+            </p>
+            <button 
+              onClick={handleNext}
+              className="w-full bg-blue-600 text-white py-3 rounded-xl font-bold shadow-md hover:bg-blue-700 transition-colors"
+            >
+              次へ進む
+            </button>
+          </div>
+        )}
+
+        {/* --- ステップ2: 利用規約 --- */}
+        {step === 2 && (
+          <div className="p-6">
+            <h2 className="text-lg font-bold text-gray-800 mb-4 text-center">
+              利用にあたってのお願い
+            </h2>
+            
+            <div className="bg-gray-50 p-4 rounded-xl border border-gray-200 h-48 overflow-y-auto text-xs text-gray-600 space-y-3 mb-4">
+              <p>
+                <strong>1. 目的</strong><br/>
+                本アプリは地域活性化とコミュニティ形成を目的としています。
+              </p>
+              <p>
+                <strong>2. 禁止事項</strong><br/>
+                他の利用者への誹謗中傷、迷惑行為、公序良俗に反する行為は禁止されています。
+              </p>
+              <p>
+                <strong>3. 免責事項</strong><br/>
+                当アプリを通じて発生したトラブルについて、運営は一切の責任を負いかねます。
+              </p>
+              <p>
+                <strong>4. 運営について</strong><br/>
+                本アプリは有志による運営であり、特定の自治体や教育機関の公式アプリではありません。
+              </p>
+            </div>
+
+            <label className="flex items-center gap-3 p-2 cursor-pointer mb-4 hover:bg-gray-50 rounded-lg transition-colors">
+              <input 
+                type="checkbox" 
+                className="w-5 h-5 text-blue-600 rounded focus:ring-blue-500 border-gray-300"
+                checked={isAgreed}
+                onChange={(e) => setIsAgreed(e.target.checked)}
+              />
+              <span className="text-sm font-bold text-gray-700">上記の内容に同意します</span>
+            </label>
+
+            <button 
+              onClick={handleNext}
+              disabled={!isAgreed}
+              className={`w-full py-3 rounded-xl font-bold shadow-md transition-colors ${
+                isAgreed 
+                  ? 'bg-blue-600 text-white hover:bg-blue-700' 
+                  : 'bg-gray-200 text-gray-400 cursor-not-allowed'
+              }`}
+            >
+              同意して次へ
+            </button>
+          </div>
+        )}
+
+        {/* --- ステップ3: PWA誘導 (ホーム画面追加) --- */}
+        {step === 3 && (
+          <div className="p-6 text-center">
+            <div className="w-16 h-16 bg-green-100 rounded-full flex items-center justify-center mx-auto mb-4 text-3xl">
+              🔔
+            </div>
+            <h2 className="text-xl font-bold text-gray-800 mb-2">
+              アプリとして使おう！
+            </h2>
+            <p className="text-xs text-gray-500 mb-6">
+              ホーム画面に追加すると、通知が届いたり、全画面でサクサク動くようになります。
+            </p>
+
+            <div className="bg-gray-50 p-4 rounded-xl border border-gray-200 text-left mb-6">
+              {isIOS ? (
+                <ol className="text-sm text-gray-700 space-y-3">
+                  <li className="flex gap-2">
+                    <span className="bg-gray-200 text-gray-600 w-5 h-5 rounded-full flex items-center justify-center text-[10px] font-bold shrink-0">1</span>
+                    <span>画面下の <span className="text-blue-600 font-bold">共有アイコン</span> をタップ</span>
+                  </li>
+                  <li className="flex gap-2">
+                    <span className="bg-gray-200 text-gray-600 w-5 h-5 rounded-full flex items-center justify-center text-[10px] font-bold shrink-0">2</span>
+                    <span>メニューから <span className="font-bold">「ホーム画面に追加」</span> を選択</span>
+                  </li>
+                  <li className="flex gap-2">
+                    <span className="bg-gray-200 text-gray-600 w-5 h-5 rounded-full flex items-center justify-center text-[10px] font-bold shrink-0">3</span>
+                    <span>右上の <span className="font-bold">「追加」</span> をタップ</span>
+                  </li>
+                </ol>
+              ) : (
+                <ol className="text-sm text-gray-700 space-y-3">
+                  <li className="flex gap-2">
+                    <span className="bg-gray-200 text-gray-600 w-5 h-5 rounded-full flex items-center justify-center text-[10px] font-bold shrink-0">1</span>
+                    <span>ブラウザのメニュー(︙) をタップ</span>
+                  </li>
+                  <li className="flex gap-2">
+                    <span className="bg-gray-200 text-gray-600 w-5 h-5 rounded-full flex items-center justify-center text-[10px] font-bold shrink-0">2</span>
+                    <span><span className="font-bold">「アプリをインストール」</span>または<span className="font-bold">「ホーム画面に追加」</span>を選択</span>
+                  </li>
+                </ol>
+              )}
+            </div>
+
+            <button 
+              onClick={handleComplete}
+              className="w-full bg-black text-white py-3 rounded-xl font-bold shadow-md hover:bg-gray-800 transition-colors"
+            >
+              はじめる
+            </button>
+            
+            <button 
+              onClick={handleComplete}
+              className="mt-3 text-xs text-gray-400 hover:text-gray-600 underline"
+            >
+              今はしない
+            </button>
+          </div>
+        )}
+
+        {/* ステップインジケーター */}
+        <div className="flex justify-center gap-1 pb-6">
+          <div className={`h-1 rounded-full transition-all duration-300 ${step === 1 ? 'w-8 bg-blue-600' : 'w-2 bg-gray-200'}`}></div>
+          <div className={`h-1 rounded-full transition-all duration-300 ${step === 2 ? 'w-8 bg-blue-600' : 'w-2 bg-gray-200'}`}></div>
+          <div className={`h-1 rounded-full transition-all duration-300 ${step === 3 ? 'w-8 bg-blue-600' : 'w-2 bg-gray-200'}`}></div>
+        </div>
+
+      </div>
+    </div>
   )
 }
 </file>
@@ -1221,136 +1214,6 @@ export default function UpdatePasswordPage() {
 }
 </file>
 
-<file path="app/utils/push.ts">
-import { createClient } from '@supabase/supabase-js'
-
-// --- (前半の署名ロジック等は変更なし) ---
-function getPkcs8Der(privateKeyBase64: string, publicKeyBase64: string): Uint8Array {
-  const rawPrivate = Uint8Array.from(atob(privateKeyBase64.replace(/-/g, '+').replace(/_/g, '/')), c => c.charCodeAt(0))
-  const rawPublic = Uint8Array.from(atob(publicKeyBase64.replace(/-/g, '+').replace(/_/g, '/')), c => c.charCodeAt(0))
-
-  const header = new Uint8Array([
-    0x30, 0x81, 0x87, 0x02, 0x01, 0x00, 0x30, 0x13, 0x06, 0x07, 0x2a, 0x86, 0x48, 0xce, 
-    0x3d, 0x02, 0x01, 0x06, 0x08, 0x2a, 0x86, 0x48, 0xce, 0x3d, 0x03, 0x01, 0x07, 0x04, 
-    0x6d, 0x30, 0x6b, 0x02, 0x01, 0x01, 0x04, 0x20
-  ])
-  const footer = new Uint8Array([0xa1, 0x44, 0x03, 0x42, 0x00])
-
-  const der = new Uint8Array(header.length + rawPrivate.length + footer.length + rawPublic.length)
-  der.set(header)
-  der.set(rawPrivate, header.length)
-  der.set(footer, header.length + rawPrivate.length)
-  der.set(rawPublic, header.length + rawPrivate.length + footer.length)
-  return der
-}
-
-async function signVapidKey(endpoint: string) {
-  const privateKey = process.env.VAPID_PRIVATE_KEY!
-  const publicKey = process.env.NEXT_PUBLIC_VAPID_PUBLIC_KEY!
-  const aud = new URL(endpoint).origin
-
-  const header = { typ: 'JWT', alg: 'ES256' }
-  const claims = {
-    aud,
-    exp: Math.floor(Date.now() / 1000) + 12 * 3600,
-    sub: 'mailto:admin@example.com' 
-  }
-
-  const stringify = (obj: any) => btoa(JSON.stringify(obj)).replace(/=/g, '').replace(/\+/g, '-').replace(/\//g, '_')
-  const unsignedToken = `${stringify(header)}.${stringify(claims)}`
-
-  const pkcs8 = getPkcs8Der(privateKey, publicKey)
-  const cryptoKey = await crypto.subtle.importKey(
-    'pkcs8',
-    pkcs8,
-    { name: 'ECDSA', namedCurve: 'P-256' },
-    false,
-    ['sign']
-  )
-
-  const signature = await crypto.subtle.sign(
-    { name: 'ECDSA', hash: { name: 'SHA-256' } },
-    cryptoKey,
-    new TextEncoder().encode(unsignedToken)
-  )
-
-  const signatureBase64 = btoa(String.fromCharCode(...new Uint8Array(signature)))
-    .replace(/=/g, '')
-    .replace(/\+/g, '-')
-    .replace(/\//g, '_')
-
-  return `${unsignedToken}.${signatureBase64}`
-}
-// --- (ここまで変更なし) ---
-
-/**
- * 共通通知送信関数
- */
-// ★ url 引数は受け取りますが、DB保存時には無視するように修正
-// eslint-disable-next-line @typescript-eslint/no-unused-vars
-export async function sendPushNotification(userId: string, title: string, body: string, url: string = '/mypage') {
-  console.log(`[Push Utils] Sending to ${userId}: ${title}`)
-
-  const supabase = createClient(
-    process.env.NEXT_PUBLIC_SUPABASE_URL!,
-    process.env.SUPABASE_SERVICE_ROLE_KEY!
-  )
-
-  // 1. 通知ログをDBに保存
-  // ★重要: ここから 'url' を削除しました。これでエラーが解消されます。
-  const { error: logError } = await supabase.from('notification_logs').insert({
-    user_id: userId,
-    title,
-    body
-    // url: url  <-- これを削除
-  })
-  
-  if (logError) {
-    // ログ保存に失敗しても、通知自体は送るように変更（エラーログだけ出す）
-    console.error('[Push Utils] Log Error (Non-fatal):', logError)
-  }
-
-  // 2. ユーザーの購読情報(エンドポイント)を取得
-  const { data: subs, error: subError } = await supabase
-    .from('push_subscriptions')
-    .select('subscription')
-    .eq('user_id', userId)
-
-  if (subError || !subs || subs.length === 0) {
-    console.warn('[Push Utils] No subscription found for user:', userId)
-    return { success: false, count: 0, message: 'No subscription' }
-  }
-
-  // 3. 各デバイスへ送信
-  let successCount = 0
-  for (const sub of subs) {
-    const subscription = sub.subscription as any
-    try {
-      const token = await signVapidKey(subscription.endpoint)
-      const res = await fetch(subscription.endpoint, {
-        method: 'POST',
-        headers: {
-          'Authorization': `vapid t=${token}, k=${process.env.NEXT_PUBLIC_VAPID_PUBLIC_KEY}`,
-          'TTL': '60',
-        },
-        body: null
-      })
-
-      if (res.ok) {
-        successCount++
-      } else {
-        console.error(`[Push Utils] Failed: ${res.status}`)
-      }
-    } catch (e) {
-      console.error('[Push Utils] Network Error:', e)
-    }
-  }
-  
-  console.log(`[Push Utils] Sent successfully to ${successCount} devices`)
-  return { success: true, count: successCount }
-}
-</file>
-
 <file path="app/utils/webPush.ts">
 // app/utils/webPush.ts
 
@@ -1492,6 +1355,152 @@ You can check out [the Next.js GitHub repository](https://github.com/vercel/next
 The easiest way to deploy your Next.js app is to use the [Vercel Platform](https://vercel.com/new?utm_medium=default-template&filter=next.js&utm_source=create-next-app&utm_campaign=create-next-app-readme) from the creators of Next.js.
 
 Check out our [Next.js deployment documentation](https://nextjs.org/docs/app/building-your-application/deploying) for more details.
+</file>
+
+<file path="app/api/admin/push/route.ts">
+import { NextResponse } from 'next/server'
+import { sendPushNotification } from '../../../utils/push'
+
+export const runtime = 'edge'
+
+export async function POST(request: Request) {
+  try {
+    const { userId, title, body } = await request.json()
+    console.log("--- Manual Push Request ---")
+    console.log(`Target: ${userId}, Title: ${title}`)
+
+    if (!userId || !title) {
+      return NextResponse.json({ success: false, message: 'Missing userId or title' }, { status: 400 })
+    }
+
+    // 部品を使って送信
+    const result = await sendPushNotification(userId, title, body || 'お知らせがあります')
+
+    return NextResponse.json(result)
+  } catch (err: unknown) {
+    console.error("Manual Push API Error:", err)
+    const errorMessage = err instanceof Error ? err.message : 'Unknown error'
+    return NextResponse.json({ success: false, error: errorMessage }, { status: 500 })
+  }
+}
+</file>
+
+<file path="app/api/chat/send/route.ts">
+import { createClient } from '@supabase/supabase-js'
+import { NextResponse } from 'next/server'
+import { sendPushNotification } from '../../../utils/push'
+
+export const runtime = 'edge'
+
+export async function POST(request: Request) {
+  try {
+    const { ApplicationId, senderId, content, isFromAdmin } = await request.json()
+
+    const supabase = createClient(
+      process.env.NEXT_PUBLIC_SUPABASE_URL!,
+      process.env.SUPABASE_SERVICE_ROLE_KEY!
+    )
+
+    // DB保存
+    const { error: insertError } = await supabase
+      .from('application_messages')
+      .insert({ application_id: ApplicationId, sender_id: senderId, content: content })
+
+    if (insertError) throw insertError
+
+    // 相手を特定して通知
+    if (isFromAdmin) {
+      // 応募情報を取得してユーザーIDを特定
+      const { data: appData } = await supabase
+        .from('job_applications')
+        .select('user_id, job:jobs(title)')
+        .eq('id', ApplicationId)
+        .single()
+      
+      if (appData) {
+        // eslint-disable-next-line @typescript-eslint/ban-ts-comment
+        // @ts-expect-error
+        const jobTitle = appData.job?.title || 'クエスト'
+        await sendPushNotification(
+          appData.user_id,
+          `新着メッセージ: ${jobTitle}`,
+          `運営から: ${content.substring(0, 30)}...`
+        )
+      }
+    }
+
+    return NextResponse.json({ success: true })
+  } catch (err: unknown) {
+    const errorMessage = err instanceof Error ? err.message : 'Unknown error'
+    return NextResponse.json({ success: false, error: errorMessage }, { status: 500 })
+  }
+}
+</file>
+
+<file path="app/api/save-subscription/route.ts">
+import { createClient } from '@supabase/supabase-js'
+import { NextResponse } from 'next/server'
+
+export const runtime = 'edge'
+
+export async function POST(request: Request) {
+  try {
+    const { subscription } = await request.json()
+    
+    // --- デバッグログ ---
+    console.log("--- Debug Save Subscription ---")
+    
+    // 1. クライアント作成
+    const supabase = createClient(
+      process.env.NEXT_PUBLIC_SUPABASE_URL!,
+      process.env.SUPABASE_SERVICE_ROLE_KEY!,
+    )
+    
+    // 2. ユーザー認証
+    const authHeader = request.headers.get('Authorization')
+    if (!authHeader) {
+        console.error("Error: No Authorization header")
+        return NextResponse.json({ success: false, message: 'No Auth Header' }, { status: 401 })
+    }
+
+    const token = authHeader.replace('Bearer ', '')
+    const { data: { user }, error: authError } = await supabase.auth.getUser(token)
+    
+    if (authError || !user) {
+        console.error("Auth Error:", authError?.message)
+        return NextResponse.json({ success: false, message: 'User Auth Failed' }, { status: 401 })
+    }
+    
+    console.log("User Identified:", user.id)
+
+    // 3. DB保存
+    const { error: insertError } = await supabase
+        .from('push_subscriptions')
+        .insert({
+            user_id: user.id,
+            subscription: subscription
+        })
+    
+    if (insertError) {
+        // すでに登録済み(重複)の場合はエラーにしない
+        if (insertError.message.includes('unique constraint') || insertError.code === '23505') {
+            console.log("Info: Already subscribed (Duplicate skipped)")
+            return NextResponse.json({ success: true, status: 'already_exists' })
+        }
+        
+        console.error("Insert Error (Details):", insertError)
+        return NextResponse.json({ success: false, message: insertError.message }, { status: 500 })
+    }
+
+    console.log("Success: Subscription saved to DB")
+    return NextResponse.json({ success: true })
+
+  } catch (err: unknown) {
+    console.error("Server Error:", err)
+    const errorMessage = err instanceof Error ? err.message : 'Unknown error'
+    return NextResponse.json({ success: false, error: errorMessage }, { status: 500 })
+  }
+}
 </file>
 
 <file path="app/components/NotificationManager.tsx">
@@ -1651,6 +1660,7 @@ import { useState } from 'react'
 import { supabase } from '../lib/supabaseClient'
 import { useRouter } from 'next/navigation'
 import Link from 'next/link'
+import { Provider } from '@supabase/supabase-js' // 型定義を追加
 
 export default function LoginPage() {
   const [email, setEmail] = useState('')
@@ -1658,7 +1668,23 @@ export default function LoginPage() {
   const [loading, setLoading] = useState(false)
   const router = useRouter()
 
-  // ログイン処理だけを残す
+  // Googleログイン処理
+  const handleSocialLogin = async (provider: Provider) => {
+    setLoading(true)
+    const { error } = await supabase.auth.signInWithOAuth({
+      provider: provider,
+      options: {
+        redirectTo: `${window.location.origin}/auth/callback?next=/mypage`,
+      },
+    })
+
+    if (error) {
+      alert('エラーが発生しました: ' + error.message)
+      setLoading(false)
+    }
+  }
+
+  // メールログイン処理
   const handleLogin = async (e: React.FormEvent) => {
     e.preventDefault()
     setLoading(true)
@@ -1669,7 +1695,7 @@ export default function LoginPage() {
     })
 
     if (error) {
-      alert('ログインエラー: ' + error.message) // パスワード違いなどはここで検知
+      alert('ログインエラー: ' + error.message)
     } else {
       router.push('/mypage')
     }
@@ -1698,6 +1724,32 @@ export default function LoginPage() {
           </div>
 
           <div className="p-6 sm:p-8">
+            
+            {/* ▼▼▼ 追加: Googleログインボタン ▼▼▼ */}
+            <div className="flex flex-col gap-3 mb-6">
+              <button
+                type="button"
+                onClick={() => handleSocialLogin('google')}
+                className="w-full flex items-center justify-center gap-2 rounded-lg border border-gray-300 bg-white py-3 font-bold text-gray-700 shadow-sm hover:bg-gray-50 transition-colors"
+              >
+                <svg className="h-5 w-5" viewBox="0 0 24 24">
+                  <path d="M22.56 12.25c0-.78-.07-1.53-.2-2.25H12v4.26h5.92c-.26 1.37-1.04 2.53-2.21 3.31v2.77h3.57c2.08-1.92 3.28-4.74 3.28-8.09z" fill="#4285F4" />
+                  <path d="M12 23c2.97 0 5.46-.98 7.28-2.66l-3.57-2.77c-.98.66-2.23 1.04-3.71 1.04-2.86 0-5.29-1.93-6.16-4.53H2.18v2.84C3.99 20.53 7.7 23 12 23z" fill="#34A853" />
+                  <path d="M5.84 14.09c-.22-.66-.35-1.36-.35-2.09s.13-1.43.35-2.09V7.07H2.18C1.43 8.55 1 10.22 1 12s.43 3.45 1.18 4.93l2.85-2.22.81-.62z" fill="#FBBC05" />
+                  <path d="M12 5.38c1.62 0 3.06.56 4.21 1.64l3.15-3.15C17.45 2.09 14.97 1 12 1 7.7 1 3.99 3.47 2.18 7.07l3.66 2.84c.87-2.6 3.3-4.53 6.16-4.53z" fill="#EA4335" />
+                </svg>
+                Googleでログイン
+              </button>
+            </div>
+
+            <div className="relative flex items-center justify-center py-2 mb-6">
+              <div className="absolute inset-0 flex items-center">
+                <div className="w-full border-t border-gray-200"></div>
+              </div>
+              <span className="relative bg-white px-2 text-xs text-gray-400">またはメールアドレスで</span>
+            </div>
+            {/* ▲▲▲ 追加ここまで ▲▲▲ */}
+
             <form onSubmit={handleLogin} className="flex flex-col gap-5">
               
               <div>
@@ -1745,7 +1797,7 @@ export default function LoginPage() {
                   <span className="relative bg-white px-2 text-xs text-gray-400">または</span>
                 </div>
 
-                {/* ★ここをボタン処理からページ移動リンクに変更★ */}
+                {/* ★新規登録リンク（ご要望通り維持しています）★ */}
                 <Link 
                   href="/signup" 
                   className="w-full rounded-lg border border-gray-300 bg-white py-3.5 font-bold text-gray-700 shadow-sm hover:bg-gray-50 active:scale-[0.98] text-center block"
@@ -1983,154 +2035,6 @@ export default function EditProfilePage() {
 
         </form>
       </main>
-    </div>
-  )
-}
-</file>
-
-<file path="app/page.tsx">
-'use client'
-
-import { useEffect, useState } from 'react'
-import { supabase } from './lib/supabaseClient'
-import Link from 'next/link'
-import { Session } from '@supabase/supabase-js'
-
-export default function Home() {
-  const [session, setSession] = useState<Session | null>(null)
-  const [loading, setLoading] = useState(true)
-
-  useEffect(() => {
-    // 初回ロード時にログイン状態を確認
-    supabase.auth.getSession().then(({ data: { session } }) => {
-      setSession(session)
-      setLoading(false)
-    })
-
-    // ログイン状態の変化を監視
-    const {
-      data: { subscription },
-    } = supabase.auth.onAuthStateChange((_event, session) => {
-      setSession(session)
-    })
-
-    return () => subscription.unsubscribe()
-  }, [])
-
-  return (
-    <div className="min-h-[100dvh] bg-gradient-to-b from-slate-50 to-white flex flex-col font-sans text-gray-900">
-      
-      {/* ヘッダー: スクロールしても追従するスティッキーヘッダー */}
-      <header className="w-full bg-white/80 backdrop-blur-md shadow-sm border-b border-gray-100 sticky top-0 z-50">
-        <div className="max-w-4xl mx-auto px-4 py-3 flex items-center justify-between">
-          <div className="flex items-center gap-2">
-            <img 
-              src="/logo.png" 
-              alt="Logo" 
-              className="h-8 w-auto object-contain sm:h-10"
-            />
-            <h1 className="text-base font-bold text-blue-600 tracking-wide">
-              しずおかコネクト
-            </h1>
-          </div>
-          {/* ログイン済みならヘッダーにもマイページリンクを表示（PCなどで便利） */}
-          {!loading && session && (
-            <Link 
-              href="/mypage" 
-              className="text-[10px] font-bold text-blue-600 border border-blue-100 bg-blue-50 px-3 py-1.5 rounded-full hover:bg-blue-100 transition-colors"
-            >
-              マイページ &rarr;
-            </Link>
-          )}
-        </div>
-      </header>
-
-      {/* メインコンテンツ */}
-      <main className="flex-grow flex flex-col items-center justify-center p-6 w-full max-w-md mx-auto relative">
-        
-        {/* 背景装飾（さりげなく） */}
-        <div className="absolute top-10 left-10 w-40 h-40 bg-blue-200 rounded-full blur-3xl opacity-20 pointer-events-none"></div>
-        <div className="absolute bottom-10 right-10 w-60 h-60 bg-indigo-200 rounded-full blur-3xl opacity-20 pointer-events-none"></div>
-
-        {/* ヒーローセクション */}
-        <div className="flex flex-col items-center text-center z-10 w-full">
-          
-          {/* ロゴを大きく表示 */}
-          <div className="mb-8 relative">
-            <div className="absolute inset-0 bg-blue-500 blur-2xl opacity-10 rounded-full"></div>
-            <img 
-              src="/logo.png" 
-              alt="Shizuoka Connect Logo" 
-              className="relative w-32 h-32 object-contain drop-shadow-lg"
-            />
-          </div>
-
-          <h1 className="text-3xl font-extrabold text-slate-800 leading-tight mb-4 tracking-tight">
-            イベント参加を、<br />
-            もっと<span className="text-blue-600">スマート</span>に。
-          </h1>
-          
-          <p className="text-sm text-gray-500 mb-10 leading-relaxed max-w-xs mx-auto">
-            しずおかコネクト公式チェックインアプリ。<br/>
-            QRコードをかざすだけで、<br/>
-            スムーズに入場・履歴管理ができます。
-          </p>
-
-          {/* アクションボタンエリア */}
-          <div className="w-full flex flex-col gap-4">
-            {loading ? (
-              // ローディング中
-              <div className="w-full h-14 bg-gray-100 rounded-xl animate-pulse flex items-center justify-center text-gray-400 text-sm">
-                読み込み中...
-              </div>
-            ) : session ? (
-              // ログイン済みの場合
-              <div className="flex flex-col gap-3 animate-fade-in-up">
-                <Link 
-                  href="/mypage"
-                  className="w-full bg-blue-600 text-white py-4 rounded-xl font-bold shadow-lg shadow-blue-200 hover:bg-blue-700 hover:shadow-xl transition-all active:scale-[0.98] flex items-center justify-center gap-2 group"
-                >
-                  <span>マイページを開く</span>
-                  <svg xmlns="http://www.w3.org/2000/svg" className="h-5 w-5 transition-transform group-hover:translate-x-1" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M13 7l5 5m0 0l-5 5m5-5H6" />
-                  </svg>
-                </Link>
-                <p className="text-xs text-gray-400 mt-2">
-                  ログイン中: {session.user.email}
-                </p>
-              </div>
-            ) : (
-              // 未ログインの場合
-              <div className="flex flex-col gap-3 animate-fade-in-up">
-                <Link 
-                  href="/login"
-                  className="w-full bg-blue-600 text-white py-4 rounded-xl font-bold shadow-lg shadow-blue-200 hover:bg-blue-700 hover:shadow-xl transition-all active:scale-[0.98] text-center"
-                >
-                  はじめる (ログイン・登録)
-                </Link>
-                
-                <div className="mt-4 grid grid-cols-2 gap-3 text-left">
-                   <div className="bg-white p-3 rounded-lg border border-gray-100 shadow-sm flex flex-col items-center text-center">
-                      <span className="text-2xl mb-1">📱</span>
-                      <span className="text-[10px] text-gray-500 font-bold">簡単チェックイン</span>
-                   </div>
-                   <div className="bg-white p-3 rounded-lg border border-gray-100 shadow-sm flex flex-col items-center text-center">
-                      <span className="text-2xl mb-1">📅</span>
-                      <span className="text-[10px] text-gray-500 font-bold">履歴が残る</span>
-                   </div>
-                </div>
-              </div>
-            )}
-          </div>
-        </div>
-      </main>
-
-      {/* フッター */}
-      <footer className="py-6 text-center border-t border-gray-100 bg-white/50 backdrop-blur-sm">
-        <p className="text-[10px] text-gray-400">
-          &copy; 2025 Shizuoka Connect.<br/>All rights reserved.
-        </p>
-      </footer>
     </div>
   )
 }
@@ -2409,6 +2313,64 @@ export default function AdminQRPage() {
       <AdminQRContent />
     </Suspense>
   )
+}
+</file>
+
+<file path="app/api/admin/broadcast/route.ts">
+import { createClient } from '@supabase/supabase-js'
+import { NextResponse } from 'next/server'
+import { sendPushNotification } from '../../../utils/push'
+
+export const runtime = 'edge'
+
+export async function POST(request: Request) {
+  try {
+    const { title, body, url } = await request.json()
+    console.log("--- Broadcast Request ---", title)
+
+    const supabase = createClient(
+      process.env.NEXT_PUBLIC_SUPABASE_URL!,
+      process.env.SUPABASE_SERVICE_ROLE_KEY!
+    )
+
+    // 1. 全ユーザーのIDを取得 (重複を排除)
+    const { data: subs, error } = await supabase
+      .from('push_subscriptions')
+      .select('user_id')
+    
+    if (error) throw error
+    if (!subs || subs.length === 0) {
+      return NextResponse.json({ success: true, count: 0, message: 'No subscribers' })
+    }
+
+    // Setを使ってユーザーIDの重複を取り除く
+    const uniqueUserIds = [...new Set(subs.map(s => s.user_id))]
+    console.log(`Broadcasting to ${uniqueUserIds.length} users...`)
+
+    // 2. ループして全員に送信
+    let successCount = 0
+    
+    // 並列処理で高速化
+    // 戻り値を number として扱うために型アサーション等は不要ですが、
+    // 次の reduce で明示的に型を指定します。
+    const promises = uniqueUserIds.map(userId => 
+      sendPushNotification(userId, title, body, url || '/mypage')
+        .then(res => res.success ? 1 : 0)
+    )
+
+    const results = await Promise.all(promises)
+    
+    // ★修正箇所: アキュムレータ(a)を明示的に number 型にする
+    successCount = results.reduce((a: number, b) => a + b, 0)
+
+    console.log(`Broadcast Complete. Success count: ${successCount}`)
+    return NextResponse.json({ success: true, count: successCount })
+
+  } catch (err: unknown) {
+    console.error("Broadcast Error:", err)
+    const errorMessage = err instanceof Error ? err.message : 'Unknown error'
+    return NextResponse.json({ success: false, error: errorMessage }, { status: 500 })
+  }
 }
 </file>
 
@@ -3706,6 +3668,177 @@ export default function JobDetailPage({ params }: { params: Promise<{ id: string
 }
 </file>
 
+<file path="app/page.tsx">
+'use client'
+
+import { useEffect, useState } from 'react'
+import { supabase } from './lib/supabaseClient'
+import Link from 'next/link'
+import { Session } from '@supabase/supabase-js'
+
+export default function Home() {
+  const [session, setSession] = useState<Session | null>(null)
+  const [loading, setLoading] = useState(true)
+
+  useEffect(() => {
+    // 初回ロード時にログイン状態を確認
+    supabase.auth.getSession().then(({ data: { session } }) => {
+      setSession(session)
+      setLoading(false)
+    })
+
+    // ログイン状態の変化を監視
+    const {
+      data: { subscription },
+    } = supabase.auth.onAuthStateChange((_event, session) => {
+      setSession(session)
+    })
+
+    return () => subscription.unsubscribe()
+  }, [])
+
+  return (
+    <div className="min-h-[100dvh] bg-gradient-to-b from-slate-50 to-white flex flex-col font-sans text-gray-900">
+      
+      {/* ヘッダー */}
+      <header className="w-full bg-white/80 backdrop-blur-md shadow-sm border-b border-gray-100 sticky top-0 z-50">
+        <div className="max-w-4xl mx-auto px-4 py-3 flex items-center justify-between">
+          <div className="flex items-center gap-2">
+            <img 
+              src="/logo.png" 
+              alt="Logo" 
+              className="h-8 w-auto object-contain sm:h-10"
+            />
+            <h1 className="text-base font-bold text-blue-600 tracking-wide">
+              しずおかコネクト
+            </h1>
+          </div>
+          {/* ログイン済みならヘッダーにもマイページリンクを表示 */}
+          {!loading && session && (
+            <Link 
+              href="/mypage" 
+              className="text-[10px] font-bold text-blue-600 border border-blue-100 bg-blue-50 px-3 py-1.5 rounded-full hover:bg-blue-100 transition-colors"
+            >
+              マイページ &rarr;
+            </Link>
+          )}
+        </div>
+      </header>
+
+      {/* メインコンテンツ */}
+      <main className="flex-grow flex flex-col items-center p-6 w-full max-w-lg mx-auto relative overflow-hidden">
+        
+        {/* 背景装飾 */}
+        <div className="absolute top-0 left-1/2 -translate-x-1/2 w-[500px] h-[500px] bg-blue-100/50 rounded-full blur-3xl opacity-30 pointer-events-none -z-10"></div>
+
+        {/* ヒーローセクション */}
+        <div className="flex flex-col items-center text-center w-full mt-4 mb-8">
+          
+          <div className="mb-6 relative group">
+            <div className="absolute inset-0 bg-blue-400 blur-2xl opacity-20 rounded-full group-hover:opacity-30 transition-opacity"></div>
+            <img 
+              src="/logo.png" 
+              alt="Shizuoka Connect Logo" 
+              className="relative w-28 h-28 object-contain drop-shadow-sm transform group-hover:scale-105 transition-transform duration-500"
+            />
+          </div>
+
+          <h1 className="text-2xl sm:text-3xl font-extrabold text-slate-800 leading-tight mb-3">
+            地域とつながる、<br />
+            毎日が<span className="text-blue-600">楽しくなる</span>。
+          </h1>
+          
+          <p className="text-sm text-gray-500 mb-8 leading-relaxed max-w-xs mx-auto">
+            イベント参加から地域ニュース、<br/>
+            ボランティア募集まで。<br/>
+            あなたの活動を可視化するアプリです。
+          </p>
+
+          {/* アクションボタンエリア */}
+          <div className="w-full max-w-xs flex flex-col gap-4 z-10">
+            {loading ? (
+              <div className="w-full h-14 bg-gray-100 rounded-xl animate-pulse flex items-center justify-center text-gray-400 text-sm">
+                読み込み中...
+              </div>
+            ) : session ? (
+              <div className="flex flex-col gap-3 animate-fade-in-up">
+                <Link 
+                  href="/mypage"
+                  className="w-full bg-gradient-to-r from-blue-600 to-indigo-600 text-white py-4 rounded-xl font-bold shadow-lg shadow-blue-200 hover:shadow-xl transition-all active:scale-[0.98] flex items-center justify-center gap-2 group"
+                >
+                  <span>マイページへ移動</span>
+                  <svg xmlns="http://www.w3.org/2000/svg" className="h-5 w-5 transition-transform group-hover:translate-x-1" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M13 7l5 5m0 0l-5 5m5-5H6" />
+                  </svg>
+                </Link>
+                <p className="text-xs text-gray-400 mt-1">
+                  ログイン中: {session.user.email}
+                </p>
+              </div>
+            ) : (
+              <div className="flex flex-col gap-3 animate-fade-in-up">
+                <Link 
+                  href="/login"
+                  className="w-full bg-blue-600 text-white py-4 rounded-xl font-bold shadow-lg shadow-blue-200 hover:bg-blue-700 hover:shadow-xl transition-all active:scale-[0.98] text-center"
+                >
+                  はじめる (ログイン・登録)
+                </Link>
+                <p className="text-xs text-gray-400 mt-1">
+                  登録は無料ですぐに始められます
+                </p>
+              </div>
+            )}
+          </div>
+        </div>
+
+        {/* 機能紹介グリッド */}
+        <div className="w-full grid grid-cols-2 gap-3 mt-4">
+            <FeatureCard 
+              emoji="📱" 
+              title="スマート入場" 
+              desc="QRコードをかざすだけで簡単チェックイン"
+            />
+            <FeatureCard 
+              emoji="🏆" 
+              title="ランクUP" 
+              desc="参加して経験値を獲得。バッジを集めよう"
+            />
+            <FeatureCard 
+              emoji="📰" 
+              title="最新ニュース" 
+              desc="地域の最新情報をいち早くキャッチ"
+            />
+            <FeatureCard 
+              emoji="🤝" 
+              title="クエスト" 
+              desc="ボランティアやミッションに参加しよう"
+            />
+        </div>
+
+      </main>
+
+      {/* フッター */}
+      <footer className="py-6 text-center border-t border-gray-100 bg-white/50 backdrop-blur-sm mt-auto">
+        <p className="text-[10px] text-gray-400">
+          &copy; 2025 Shizuoka Connect.<br/>All rights reserved.
+        </p>
+      </footer>
+    </div>
+  )
+}
+
+// 機能紹介カードコンポーネント
+function FeatureCard({ emoji, title, desc }: { emoji: string, title: string, desc: string }) {
+  return (
+    <div className="bg-white p-4 rounded-xl border border-gray-100 shadow-sm flex flex-col items-center text-center hover:border-blue-100 hover:shadow-md transition-all">
+      <span className="text-3xl mb-2">{emoji}</span>
+      <h3 className="text-xs font-bold text-gray-800 mb-1">{title}</h3>
+      <p className="text-[10px] text-gray-500 leading-tight">{desc}</p>
+    </div>
+  )
+}
+</file>
+
 <file path="app/reset-password/page.tsx">
 'use client'
 
@@ -4186,6 +4319,95 @@ export default function CheckInPage() {
 }
 </file>
 
+<file path="app/layout.tsx">
+import type { Metadata } from "next";
+import { Geist, Geist_Mono } from "next/font/google";
+import "./globals.css";
+import ServiceWorkerRegister from './components/ServiceWorkerRegister';
+
+
+const geistSans = Geist({
+  variable: "--font-geist-sans",
+  subsets: ["latin"],
+});
+
+const geistMono = Geist_Mono({
+  variable: "--font-geist-mono",
+  subsets: ["latin"],
+});
+
+export const metadata: Metadata = {
+  title: "しずおかコネクト",
+  description: "イベント参加管理アプリ",
+  manifest: "/manifest.json", // これを追加
+  appleWebApp: {
+    capable: true,
+    statusBarStyle: "default",
+    title: "しずおかコネクト",
+  },
+  icons: {
+    icon: '/logo.png',
+    apple: '/logo.png',
+  },
+};
+
+// ... 既存のRootLayout
+
+export default function RootLayout({
+  children,
+}: Readonly<{
+  children: React.ReactNode;
+}>) {
+  return (
+    <html lang="ja">
+      <body className={`${geistSans.variable} ${geistMono.variable} antialiased`}>
+        <ServiceWorkerRegister /> {/* ★ここに追加 */}
+        {children}
+      </body>
+    </html>
+  );
+}
+</file>
+
+<file path="package.json">
+{
+  "name": "event-app",
+  "version": "0.1.0",
+  "private": true,
+  "scripts": {
+    "dev": "next dev",
+    "build": "next build",
+    "start": "next start",
+    "lint": "eslint",
+    "pages:build": "npx @cloudflare/next-on-pages"
+  },
+  "dependencies": {
+    "@supabase/ssr": "^0.8.0",
+    "@supabase/supabase-js": "^2.87.1",
+    "@yudiel/react-qr-scanner": "^2.4.1",
+    "browser-image-compression": "^2.0.2",
+    "cheerio": "^1.2.0",
+    "next": "^15.0.3",
+    "qrcode.react": "^4.2.0",
+    "react": "^18.3.1",
+    "react-dom": "^18.3.1",
+    "react-qr-code": "^2.0.18",
+    "rss-parser": "^3.13.0"
+  },
+  "devDependencies": {
+    "@cloudflare/next-on-pages": "^1.13.16",
+    "@tailwindcss/postcss": "^4",
+    "@types/node": "^20",
+    "@types/react": "^19",
+    "@types/react-dom": "^19",
+    "eslint": "^9",
+    "eslint-config-next": "16.0.10",
+    "tailwindcss": "^4",
+    "typescript": "^5"
+  }
+}
+</file>
+
 <file path="app/components/mypage/UserView.tsx">
 'use client'
 
@@ -4195,6 +4417,7 @@ import { eventSupabase } from '@/app/lib/eventDbClient'
 import { useRouter } from 'next/navigation'
 import Link from 'next/link'
 import NotificationManager from '../NotificationManager'
+import OnboardingModal from '../OnboardingModal' // ★追加: オンボーディングモーダル
 
 const EXTERNAL_SITE_URL = 'https://hamamtsu-events.shizuoka-connect.com'
 
@@ -4847,6 +5070,7 @@ export default function UserView({ userId, userEmail }: { userId: string, userEm
             <NewsCarousel newsItems={news} />
             <NotificationManager />
             <QuestDashboard isHome={true} />
+            <OnboardingModal />
 
             <section>
                <div className="flex items-center justify-between mb-3 px-1"><h3 className="font-bold text-gray-700 flex items-center gap-2"><span>📅</span> 開催予定のイベント</h3><button onClick={() => setActiveTab('events')} className="text-xs text-blue-600 font-bold hover:underline">すべて見る</button></div>
@@ -4954,92 +5178,133 @@ export default function UserView({ userId, userEmail }: { userId: string, userEm
 }
 </file>
 
-<file path="app/layout.tsx">
-import type { Metadata } from "next";
-import { Geist, Geist_Mono } from "next/font/google";
-import "./globals.css";
-import ServiceWorkerRegister from './components/ServiceWorkerRegister';
+<file path="app/utils/push.ts">
+import { createClient } from '@supabase/supabase-js'
 
+// --- (前半の署名ロジック等は変更なし) ---
+function getPkcs8Der(privateKeyBase64: string, publicKeyBase64: string): Uint8Array {
+  const rawPrivate = Uint8Array.from(atob(privateKeyBase64.replace(/-/g, '+').replace(/_/g, '/')), c => c.charCodeAt(0))
+  const rawPublic = Uint8Array.from(atob(publicKeyBase64.replace(/-/g, '+').replace(/_/g, '/')), c => c.charCodeAt(0))
 
-const geistSans = Geist({
-  variable: "--font-geist-sans",
-  subsets: ["latin"],
-});
+  const header = new Uint8Array([
+    0x30, 0x81, 0x87, 0x02, 0x01, 0x00, 0x30, 0x13, 0x06, 0x07, 0x2a, 0x86, 0x48, 0xce, 
+    0x3d, 0x02, 0x01, 0x06, 0x08, 0x2a, 0x86, 0x48, 0xce, 0x3d, 0x03, 0x01, 0x07, 0x04, 
+    0x6d, 0x30, 0x6b, 0x02, 0x01, 0x01, 0x04, 0x20
+  ])
+  const footer = new Uint8Array([0xa1, 0x44, 0x03, 0x42, 0x00])
 
-const geistMono = Geist_Mono({
-  variable: "--font-geist-mono",
-  subsets: ["latin"],
-});
-
-export const metadata: Metadata = {
-  title: "しずおかコネクト",
-  description: "イベント参加管理アプリ",
-  manifest: "/manifest.json", // これを追加
-  appleWebApp: {
-    capable: true,
-    statusBarStyle: "default",
-    title: "しずおかコネクト",
-  },
-  icons: {
-    icon: '/logo.png',
-    apple: '/logo.png',
-  },
-};
-
-// ... 既存のRootLayout
-
-export default function RootLayout({
-  children,
-}: Readonly<{
-  children: React.ReactNode;
-}>) {
-  return (
-    <html lang="ja">
-      <body className={`${geistSans.variable} ${geistMono.variable} antialiased`}>
-        <ServiceWorkerRegister /> {/* ★ここに追加 */}
-        {children}
-      </body>
-    </html>
-  );
+  const der = new Uint8Array(header.length + rawPrivate.length + footer.length + rawPublic.length)
+  der.set(header)
+  der.set(rawPrivate, header.length)
+  der.set(footer, header.length + rawPrivate.length)
+  der.set(rawPublic, header.length + rawPrivate.length + footer.length)
+  return der
 }
-</file>
 
-<file path="package.json">
-{
-  "name": "event-app",
-  "version": "0.1.0",
-  "private": true,
-  "scripts": {
-    "dev": "next dev",
-    "build": "next build",
-    "start": "next start",
-    "lint": "eslint",
-    "pages:build": "npx @cloudflare/next-on-pages"
-  },
-  "dependencies": {
-    "@supabase/ssr": "^0.8.0",
-    "@supabase/supabase-js": "^2.87.1",
-    "@yudiel/react-qr-scanner": "^2.4.1",
-    "browser-image-compression": "^2.0.2",
-    "cheerio": "^1.2.0",
-    "next": "^15.0.3",
-    "qrcode.react": "^4.2.0",
-    "react": "^18.3.1",
-    "react-dom": "^18.3.1",
-    "react-qr-code": "^2.0.18",
-    "rss-parser": "^3.13.0"
-  },
-  "devDependencies": {
-    "@cloudflare/next-on-pages": "^1.13.16",
-    "@tailwindcss/postcss": "^4",
-    "@types/node": "^20",
-    "@types/react": "^19",
-    "@types/react-dom": "^19",
-    "eslint": "^9",
-    "eslint-config-next": "16.0.10",
-    "tailwindcss": "^4",
-    "typescript": "^5"
+async function signVapidKey(endpoint: string) {
+  const privateKey = process.env.VAPID_PRIVATE_KEY!
+  const publicKey = process.env.NEXT_PUBLIC_VAPID_PUBLIC_KEY!
+  const aud = new URL(endpoint).origin
+
+  const header = { typ: 'JWT', alg: 'ES256' }
+  const claims = {
+    aud,
+    exp: Math.floor(Date.now() / 1000) + 12 * 3600,
+    sub: 'mailto:admin@example.com' 
   }
+
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const stringify = (obj: any) => btoa(JSON.stringify(obj)).replace(/=/g, '').replace(/\+/g, '-').replace(/\//g, '_')
+  const unsignedToken = `${stringify(header)}.${stringify(claims)}`
+
+  const pkcs8 = getPkcs8Der(privateKey, publicKey)
+  const cryptoKey = await crypto.subtle.importKey(
+    'pkcs8',
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    pkcs8 as any, 
+    { name: 'ECDSA', namedCurve: 'P-256' },
+    false,
+    ['sign']
+  )
+
+  const signature = await crypto.subtle.sign(
+    { name: 'ECDSA', hash: { name: 'SHA-256' } },
+    cryptoKey,
+    new TextEncoder().encode(unsignedToken)
+  )
+
+  const signatureBase64 = btoa(String.fromCharCode(...new Uint8Array(signature)))
+    .replace(/=/g, '')
+    .replace(/\+/g, '-')
+    .replace(/\//g, '_')
+
+  return `${unsignedToken}.${signatureBase64}`
+}
+// --- (ここまで変更なし) ---
+
+/**
+ * 共通通知送信関数
+ */
+// eslint-disable-next-line @typescript-eslint/no-unused-vars
+export async function sendPushNotification(userId: string, title: string, body: string, url: string = '/mypage') {
+  console.log(`[Push Utils] Sending to ${userId}: ${title}`)
+
+  const supabase = createClient(
+    process.env.NEXT_PUBLIC_SUPABASE_URL!,
+    process.env.SUPABASE_SERVICE_ROLE_KEY!
+  )
+
+  // 1. 通知ログをDBに保存
+  const { error: logError } = await supabase.from('notification_logs').insert({
+    user_id: userId,
+    title,
+    body
+    // url: url (DBにカラムがない場合は削除)
+  })
+  
+  if (logError) {
+    console.error('[Push Utils] Log Error (Non-fatal):', logError)
+  }
+
+  // 2. ユーザーの購読情報(エンドポイント)を取得
+  const { data: subs, error: subError } = await supabase
+    .from('push_subscriptions')
+    .select('subscription')
+    .eq('user_id', userId)
+
+  if (subError || !subs || subs.length === 0) {
+    console.warn('[Push Utils] No subscription found for user:', userId)
+    return { success: false, count: 0, message: 'No subscription' }
+  }
+
+  // 3. 各デバイスへ送信
+  let successCount = 0
+  for (const sub of subs) {
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const subscription = sub.subscription as any
+    try {
+      const token = await signVapidKey(subscription.endpoint)
+      const res = await fetch(subscription.endpoint, {
+        method: 'POST',
+        headers: {
+          'Authorization': `vapid t=${token}, k=${process.env.NEXT_PUBLIC_VAPID_PUBLIC_KEY}`,
+          'TTL': '60',
+        },
+        body: null
+      })
+
+      if (res.ok) {
+        successCount++
+      } else {
+        console.error(`[Push Utils] Failed: ${res.status}`)
+      }
+    } catch (e) {
+      console.error('[Push Utils] Network Error:', e)
+    }
+  }
+  
+  console.log(`[Push Utils] Sent successfully to ${successCount} devices`)
+  return { success: true, count: successCount }
 }
 </file>
 
@@ -5130,8 +5395,8 @@ async function parseRss(url: string): Promise<{ items: RssItem[] }> {
     })
 
     return { items }
-  } catch (e) {
-    console.error('RSS Parse Error:', e)
+  } catch (_e) { // ★修正: _e に変更
+    console.error('RSS Parse Error:', _e)
     return { items: [] }
   }
 }
@@ -5209,7 +5474,7 @@ export async function POST(request: Request) {
           items = feed.items
           logs.push(`  ✅ RSS: ${items.length}件`)
         }
-      } catch (e) { 
+      } catch (_e) { // ★修正: _e に変更
         logs.push(`  ℹ️ RSS失敗`) 
       }
 
@@ -5247,7 +5512,7 @@ export async function POST(request: Request) {
           items = Array.from(uniqueItems.values())
           
           if (items.length > 0) logs.push(`  ✅ HTML: ${items.length}件`)
-        } catch (err) { 
+        } catch (_err) { // ★修正: _err に変更
           /* 無視 */ 
         }
       }
