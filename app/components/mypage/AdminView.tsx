@@ -102,7 +102,7 @@ type ChatMessage = {
   created_at: string
 }
 
-// ★ 追加: レポート用の型定義
+// ★ レポート用の型定義
 type EventReport = {
   id: number
   content: string
@@ -119,14 +119,65 @@ type EventReport = {
   }
 }
 
+// ★ リクエスト用の型定義
+type UserRequest = {
+  id: number
+  content: string
+  created_at: string
+  user: {
+    email: string
+    username: string | null
+  }
+}
+
+// ▼▼▼ Supabaseからの戻り値用の厳密な型定義 ▼▼▼
+type UserRequestResponse = {
+  id: number
+  content: string
+  created_at: string
+  user: {
+    email: string | null
+    username: string | null
+  } | null
+}
+
+type EventReportResponse = {
+  id: number
+  content: string
+  rating: number
+  xp_bonus: number
+  created_at: string
+  user: {
+    email: string | null
+    username: string | null
+    avatar_url: string | null
+  } | null
+  participation: {
+    event_id: number
+  } | null
+}
+
+type JobApplicationResponse = {
+  id: number
+  user_id: string
+  status: string
+  message: string
+  created_at: string
+  user: {
+    email: string | null
+    current_rank: string | null
+    total_xp: number | null
+  } | null
+}
+
+
 export default function AdminView({ userEmail }: { userEmail: string }) {
   const router = useRouter()
   const [loading, setLoading] = useState(true)
   
-  // ★ 修正: 'reports' を追加
-  type ViewState = 'job_list' | 'job_detail' | 'create_job' | 'qr' | 'news_list' | 'edit_news' | 'user_search' | 'reports'
+  type ViewState = 'job_list' | 'job_detail' | 'create_job' | 'qr' | 'news_list' | 'edit_news' | 'user_search' | 'reports' | 'requests'
   const [activeView, setActiveView] = useState<ViewState>('job_list')
-
+  const [userRequests, setUserRequests] = useState<UserRequest[]>([])
   const [allBadges, setAllBadges] = useState<Badge[]>([])
 
   const [events, setEvents] = useState<ExternalEvent[]>([])
@@ -172,7 +223,6 @@ export default function AdminView({ userEmail }: { userEmail: string }) {
   const [isChatSending, setIsChatSending] = useState(false)
   const messagesEndRef = useRef<HTMLDivElement>(null)
 
-  // ★ 追加: レポート管理用ステート
   const [reports, setReports] = useState<EventReport[]>([])
   const [reportFilterEventId, setReportFilterEventId] = useState<number | 'all'>('all')
 
@@ -186,9 +236,7 @@ export default function AdminView({ userEmail }: { userEmail: string }) {
       const { data: eventData } = await eventSupabase
         .from('events')
         .select('id, title, event_date')
-        // ★ここに追加: しずおかコネクト主催イベントのみに絞り込み
         .eq('poster_id', SHIZUOKA_CONNECT_POSTER_ID)
-        // --------------------------------------
         .order('event_date', { ascending: false })
         .returns<ExternalEvent[]>()
       setEvents(eventData || [])
@@ -199,8 +247,9 @@ export default function AdminView({ userEmail }: { userEmail: string }) {
       void fetchJobs()
       void fetchNews()
       void fetchSources()
+      void fetchRequests()
       void fetchUsers()
-      void fetchReports() // ★ 追加
+      void fetchReports()
       setLoading(false)
     }
     void init()
@@ -236,22 +285,72 @@ export default function AdminView({ userEmail }: { userEmail: string }) {
     setUsers(data || [])
   }
 
-  // ★ 追加: レポート取得関数
+  // リクエスト削除関数
+  const handleDeleteRequest = async (id: number) => {
+    if (!confirm('このリクエストを削除してもよろしいですか？')) return
+
+    try {
+      const { error } = await supabase.from('user_requests').delete().eq('id', id)
+      
+      if (error) throw error
+
+      // 削除が成功したら、画面上のリストからも該当の項目を取り除く
+      setUserRequests(prev => prev.filter(req => req.id !== id))
+      alert('リクエストを削除いたしました。')
+      
+    } catch (e: unknown) {
+      if (e instanceof Error) {
+        alert('削除に失敗いたしました: ' + e.message)
+      } else {
+        alert('予期せぬエラーが発生いたしました。')
+      }
+    }
+  }
+
+  // リクエスト取得関数
+  const fetchRequests = async () => {
+    const { data, error } = await supabase
+      .from('user_requests')
+      .select(`
+        id,
+        content,
+        created_at,
+        user:profiles(email, username)
+      `)
+      .order('created_at', { ascending: false })
+      .returns<UserRequestResponse[]>()
+
+    if (!error && data) {
+      const formattedRequests: UserRequest[] = data.map(r => ({
+        id: r.id,
+        content: r.content,
+        created_at: r.created_at,
+        user: {
+          email: r.user?.email || 'Unknown',
+          username: r.user?.username || null
+        }
+      }))
+      setUserRequests(formattedRequests)
+    }
+  }
+
+  // レポート取得関数
   const fetchReports = async () => {
-    // ネストしたリレーションを取得: report -> participation -> (event_id)
     const { data, error } = await supabase
       .from('event_reports')
       .select(`
-        *,
+        id,
+        content,
+        rating,
+        xp_bonus,
+        created_at,
         user:profiles(email, username, avatar_url),
         participation:participations(event_id)
       `)
       .order('created_at', { ascending: false })
-      // eslint-disable-next-line @typescript-eslint/no-explicit-any
-      .returns<any[]>() // 型定義の複雑さを回避するため一時的にany
+      .returns<EventReportResponse[]>()
 
     if (!error && data) {
-      // 型アサーションで整形
       const formattedReports: EventReport[] = data.map(r => ({
         id: r.id,
         content: r.content,
@@ -260,8 +359,8 @@ export default function AdminView({ userEmail }: { userEmail: string }) {
         created_at: r.created_at,
         user: {
           email: r.user?.email || 'Unknown',
-          username: r.user?.username,
-          avatar_url: r.user?.avatar_url
+          username: r.user?.username || null,
+          avatar_url: r.user?.avatar_url || null
         },
         participation: {
           event_id: r.participation?.event_id || 0
@@ -271,7 +370,6 @@ export default function AdminView({ userEmail }: { userEmail: string }) {
     }
   }
 
-  // ... (既存の handleJobClick, handleDeleteJob, updateStatus, handleCreateJob 等の関数はそのまま維持) ...
   const handleJobClick = async (job: Job) => {
     setSelectedJobId(job.id)
     setSelectedJob(job)
@@ -282,11 +380,9 @@ export default function AdminView({ userEmail }: { userEmail: string }) {
       .select(`id, user_id, status, message, created_at, user:profiles ( email, current_rank, total_xp )`)
       .eq('job_id', job.id)
       .order('created_at', { ascending: false })
+      .returns<JobApplicationResponse[]>()
 
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    type AppResponse = any // 簡易対応
-    
-    const formattedApplicants: Applicant[] = ((appData as unknown) as AppResponse[] || []).map((app) => ({
+    const formattedApplicants: Applicant[] = (appData || []).map((app) => ({
       id: app.id,
       user_id: app.user_id,
       status: (app.status as 'pending' | 'approved' | 'rejected'),
@@ -327,7 +423,6 @@ export default function AdminView({ userEmail }: { userEmail: string }) {
       const { data: { user } } = await supabase.auth.getUser()
       const rewardFormatted = newJob.reward_val ? `${Number(newJob.reward_val).toLocaleString()}円` : '応相談'
 
-      // 1. クエストデータの保存
       const { error } = await supabase.from('jobs').insert({
         title: newJob.title,
         description: newJob.description,
@@ -383,6 +478,7 @@ export default function AdminView({ userEmail }: { userEmail: string }) {
       if (data) setQrValue(data.secret_code)
     }
   }
+
   const generateNewQr = async () => {
     if (!selectedEventId || !confirm('新しいQRを発行しますか？')) return
     setIsQrProcessing(true)
@@ -420,7 +516,6 @@ export default function AdminView({ userEmail }: { userEmail: string }) {
         alert('同期エラー: ' + (data.message || '詳細不明'))
       }
     } catch (e) {
-      // eslint-disable-next-line @typescript-eslint/no-unused-vars
       const _ = e
       alert('通信エラーが発生しました')
     } finally {
@@ -434,13 +529,16 @@ export default function AdminView({ userEmail }: { userEmail: string }) {
     if (error) alert('エラー: ' + error.message)
     else { setNewSource({ name: '', rss_url: '', fallback_url: '' }); fetchSources() }
   }
+
   const handleDeleteSource = async (id: number) => {
     if (!confirm('監視を解除しますか？')) return
     const { error } = await supabase.from('news_sources').delete().eq('id', id)
     if(error) alert('エラー: ' + error.message); else fetchSources()
   }
+
   const openCreateNews = () => { setEditingNewsId(null); setNewsForm({ title: '', link_url: '', content: '', source_name: '公式お知らせ', image_url: '' }); setActiveView('edit_news') }
   const openEditNews = (news: NewsFeed) => { setEditingNewsId(news.id); setNewsForm({ title: news.title, link_url: news.link_url || '', content: news.content || '', source_name: news.source_name || '', image_url: news.image_url || '' }); setActiveView('edit_news') }
+  
   const handleDeleteNews = async (id: number) => {
     if (!confirm('本当に削除しますか？')) return
     const { error } = await supabase.from('news_feeds').delete().eq('id', id)
@@ -617,7 +715,6 @@ export default function AdminView({ userEmail }: { userEmail: string }) {
       setChatMessages(prev => [...prev, newMsg]); setChatInput('')
       setTimeout(() => messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' }), 100)
     } catch(e) { 
-      // eslint-disable-next-line @typescript-eslint/no-unused-vars
       const _ = e
       alert('送信エラー') 
     } finally { setIsChatSending(false) }
@@ -642,13 +739,68 @@ export default function AdminView({ userEmail }: { userEmail: string }) {
             <button onClick={() => setActiveView('user_search')} className={`text-left px-6 py-4 font-bold text-sm flex gap-3 whitespace-nowrap ${activeView === 'user_search' ? 'bg-blue-50 text-blue-600 md:border-l-4 md:border-b-0 border-b-4 border-blue-600' : 'text-gray-600 hover:bg-gray-50'}`}><span>🔍</span> ユーザー・スカウト</button>
             <button onClick={() => setActiveView('news_list')} className={`text-left px-6 py-4 font-bold text-sm flex gap-3 whitespace-nowrap ${['news_list', 'edit_news'].includes(activeView) ? 'bg-blue-50 text-blue-600 md:border-l-4 md:border-b-0 border-b-4 border-blue-600' : 'text-gray-600 hover:bg-gray-50'}`}><span>📢</span> お知らせ管理</button>
             <button onClick={() => setActiveView('qr')} className={`text-left px-6 py-4 font-bold text-sm flex gap-3 whitespace-nowrap ${activeView === 'qr' ? 'bg-blue-50 text-blue-600 md:border-l-4 md:border-b-0 border-b-4 border-blue-600' : 'text-gray-600 hover:bg-gray-50'}`}><span>🎟️</span> QR発行</button>
-            {/* ★ 追加: レポート管理メニュー */}
+            <button 
+              onClick={() => setActiveView('requests')} 
+              className={`text-left px-6 py-4 font-bold text-sm flex gap-3 whitespace-nowrap ${activeView === 'requests' ? 'bg-blue-50 text-blue-600 md:border-l-4 md:border-b-0 border-b-4 border-blue-600' : 'text-gray-600 hover:bg-gray-50'}`}
+            >
+              <span>💡</span> リクエスト管理
+            </button>
             <button onClick={() => setActiveView('reports')} className={`text-left px-6 py-4 font-bold text-sm flex gap-3 whitespace-nowrap ${activeView === 'reports' ? 'bg-blue-50 text-blue-600 md:border-l-4 md:border-b-0 border-b-4 border-blue-600' : 'text-gray-600 hover:bg-gray-50'}`}><span>📝</span> レポート管理</button>
           </nav>
 
           <main className="flex-1 bg-white rounded-xl shadow-sm border border-gray-200 min-h-[600px] p-4 sm:p-6 relative w-full overflow-hidden">
             
-            {/* ... (Existing Views: job_list, job_detail, create_job, news_list, edit_news, user_search) ... */}
+            {activeView === 'requests' && (
+              <div className="animate-fade-in-up">
+                <h2 className="text-xl font-bold text-gray-800 mb-6">ユーザーからのリクエスト</h2>
+                
+                <div className="space-y-4">
+                  {userRequests.length === 0 ? (
+                    <div className="p-8 text-center text-gray-400 border border-dashed border-gray-200 rounded-xl text-sm bg-white">
+                      現在リクエストは届いていません
+                    </div>
+                  ) : (
+                    userRequests.map(req => (
+                      <div key={req.id} className="bg-white p-5 rounded-xl border border-gray-200 shadow-sm">
+                        <div className="flex items-center justify-between mb-3">
+                          <div className="flex items-center gap-3">
+                            <div className="w-10 h-10 bg-blue-100 text-blue-600 rounded-full flex items-center justify-center font-bold text-sm">
+                              {(req.user.username || req.user.email)[0].toUpperCase()}
+                            </div>
+                            <div>
+                              <p className="text-sm font-bold text-gray-800">{req.user.username || '名無しさん'}</p>
+                              <p className="text-[10px] text-gray-400">{req.user.email}</p>
+                            </div>
+                          </div>
+
+                          {/* ▼▼▼ ここから変更：日時と削除ボタンを横並びにする ▼▼▼ */}
+                          <div className="flex items-center gap-2">
+                            <span className="text-xs text-gray-500 bg-gray-50 px-2 py-1 rounded border border-gray-100 font-mono">
+                              {new Date(req.created_at).toLocaleString('ja-JP')}
+                            </span>
+                            <button 
+                              onClick={() => handleDeleteRequest(req.id)}
+                              className="text-xs text-red-500 bg-white border border-red-200 px-3 py-1 rounded hover:bg-red-50 font-bold transition-colors shadow-sm"
+                            >
+                              削除
+                            </button>
+                          </div>
+                          {/* ▲▲▲ ここまで変更 ▲▲▲ */}
+
+                          <span className="text-xs text-gray-500 bg-gray-50 px-2 py-1 rounded border border-gray-100 font-mono">
+                            {new Date(req.created_at).toLocaleString('ja-JP')}
+                          </span>
+                        </div>
+                        <div className="bg-gray-50 p-4 rounded-lg text-sm text-gray-700 whitespace-pre-wrap leading-relaxed border border-gray-100">
+                          {req.content}
+                        </div>
+                      </div>
+                    ))
+                  )}
+                </div>
+              </div>
+            )}
+
             {activeView === 'job_list' && (
                <div className="animate-fade-in-up">
                 <h2 className="text-xl font-bold text-gray-800 mb-6">求人リスト</h2>
@@ -978,7 +1130,7 @@ export default function AdminView({ userEmail }: { userEmail: string }) {
               </div>
             )}
 
-            {/* ★ 追加: レポート管理ビュー */}
+            {/* ★ レポート管理ビュー */}
             {activeView === 'reports' && (
               <div className="animate-fade-in-up">
                 <h2 className="text-xl font-bold text-gray-800 mb-6">イベント参加レポート</h2>

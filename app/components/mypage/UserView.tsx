@@ -193,6 +193,9 @@ export default function UserView({ userId, userEmail }: { userId: string, userEm
   const [selectedDateStr, setSelectedDateStr] = useState<string>(new Date().toISOString().split('T')[0]) // 選択中の日付 (YYYY-MM-DD)
   // ▲▲▲ 追加ここまで ▲▲▲
 
+  const [requestText, setRequestText] = useState('')
+  const [isSubmittingRequest, setIsSubmittingRequest] = useState(false)
+
   useEffect(() => {
     const init = async () => {
       const storedHidden = localStorage.getItem('hidden_quest_results')
@@ -309,6 +312,30 @@ export default function UserView({ userId, userEmail }: { userId: string, userEm
      setSelectedDateStr('')
     }
 
+
+  // 送信処理の関数
+const handleRequestSubmit = async (e: React.FormEvent) => {
+  e.preventDefault()
+  if (!requestText.trim()) return
+  setIsSubmittingRequest(true)
+
+  try {
+    const { error } = await supabase.from('user_requests').insert({
+      user_id: userId,
+      content: requestText.trim(),
+    })
+
+    if (error) throw error
+
+    alert('リクエストを送信しました！貴重なご意見ありがとうございます。')
+    setRequestText('') // 送信成功したら入力欄を空にする
+  } catch (err) {
+    console.error(err)
+    alert('送信に失敗しました。時間をおいて再度お試しください。')
+  } finally {
+    setIsSubmittingRequest(false)
+  }
+}
 
   // カレンダーレンダリング関数
   const renderCalendar = () => {
@@ -860,6 +887,33 @@ export default function UserView({ userId, userEmail }: { userId: string, userEm
                 </button>
                 {/* 常に下に「近日開催の全イベント」を出しても良いが、今回はカレンダーメインにするため省略 */}
               </div>
+              {/* ▼▼▼ ここからリクエストボックスを追加 ▼▼▼ */}
+              <div className="mt-8 bg-white p-5 rounded-xl shadow-sm border border-gray-200">
+                <h3 className="font-bold text-gray-800 mb-2 flex items-center gap-2">
+                  <span>💡</span> 運営へのリクエスト
+                </h3>
+                <p className="text-xs text-gray-500 mb-4">
+                  「こんなイベントをやってほしい！」「こんな機能が欲しい！」など、あなたのご意見をお聞かせください。
+                </p>
+                <form onSubmit={handleRequestSubmit}>
+                  <textarea
+                    className="w-full p-3 border border-gray-300 rounded-lg text-sm focus:ring-2 focus:ring-blue-500 focus:outline-none mb-3 bg-gray-50 resize-none"
+                    rows={3}
+                    placeholder="ここにリクエストを入力してください..."
+                    value={requestText}
+                    onChange={(e) => setRequestText(e.target.value)}
+                    disabled={isSubmittingRequest}
+                  ></textarea>
+                  <button
+                    type="submit"
+                    disabled={!requestText.trim() || isSubmittingRequest}
+                    className="w-full bg-slate-800 text-white font-bold py-3 rounded-xl hover:bg-slate-900 disabled:opacity-50 transition-colors shadow-sm flex items-center justify-center gap-2"
+                  >
+                    {isSubmittingRequest ? '送信中...' : 'リクエストを送信する'}
+                  </button>
+                </form>
+              </div>
+              {/* ▲▲▲ ここまで ▲▲▲ */}
             </div>
           </div>
         )}
