@@ -163,6 +163,12 @@ export default function UserView({ userId, userEmail }: { userId: string, userEm
   const [loading, setLoading] = useState(true)
   const [activeTab, setActiveTab] = useState<'home' | 'events' | 'quests' | 'messages' | 'info' | 'history'>('home')
   
+// ▼▼▼ 追加: ユーザーネーム強制登録用のState ▼▼▼
+  const [needsUsername, setNeedsUsername] = useState(false)
+  const [inputUsername, setInputUsername] = useState('')
+  const [isSavingUsername, setIsSavingUsername] = useState(false)
+  // ▲▲▲ 追加ここまで ▲▲▲
+
   const [profile, setProfile] = useState<Profile | null>(null)
   const [badges, setBadges] = useState<Badge[]>([])
   const [history, setHistory] = useState<HistoryItem[]>([])
@@ -225,6 +231,13 @@ export default function UserView({ userId, userEmail }: { userId: string, userEm
         await supabase.from('profiles').upsert({ id: userId, ...updates })
         profileData = { ...profileData, ...updates, id: userId }
       }
+
+      // ▼▼▼ 追加: ユーザーネーム強制チェック ▼▼▼
+      // username が null または 空文字の場合、強制登録モードにする
+      if (!profileData.username || profileData.username.trim() === '') {
+        setNeedsUsername(true)
+      }
+      // ▲▲▲ 追加ここまで ▲▲▲
 
       setProfile(profileData)
       setNextRank(nextRankObj)
@@ -422,6 +435,37 @@ const handleRequestSubmit = async (e: React.FormEvent) => {
       </div>
     )
   }
+
+  // ▼▼▼ 追加: ユーザーネーム保存処理 ▼▼▼
+  const handleSaveUsername = async (e: React.FormEvent) => {
+    e.preventDefault()
+    const trimmedName = inputUsername.trim()
+    if (!trimmedName) return
+
+    setIsSavingUsername(true)
+    try {
+      // DB更新
+      const { error } = await supabase
+        .from('profiles')
+        .update({ username: trimmedName })
+        .eq('id', userId)
+
+      if (error) throw error
+
+      // 成功したらローカルのstateも更新してモーダルを閉じる
+      if (profile) {
+        setProfile({ ...profile, username: trimmedName })
+      }
+      setNeedsUsername(false)
+      alert('ユーザーネームを登録しました！\nようこそ、' + trimmedName + 'さん！')
+    } catch (err) {
+      console.error(err)
+      alert('登録に失敗しました。時間をおいて再度お試しください。')
+    } finally {
+      setIsSavingUsername(false)
+    }
+  }
+  // ▲▲▲ 追加ここまで ▲▲▲
 
   const openChat = async (app: MyApplication) => {
     setActiveChatApp(app)
@@ -678,6 +722,54 @@ const handleRequestSubmit = async (e: React.FormEvent) => {
 
 
   if (loading) return <div className="min-h-screen flex items-center justify-center bg-gray-50"><div className="animate-pulse w-10 h-10 border-4 border-gray-200 border-t-blue-600 rounded-full animate-spin"></div></div>
+
+// ▼▼▼ 追加: ユーザーネーム未設定時の強制ブロッキング画面 ▼▼▼
+  if (needsUsername) {
+    return (
+      <div className="min-h-screen bg-gray-50 flex flex-col items-center justify-center p-6 font-sans text-gray-900">
+        <div className="bg-white w-full max-w-sm rounded-2xl shadow-xl overflow-hidden p-8 animate-fade-in-up border border-gray-200">
+          <div className="text-center mb-6">
+            <div className="w-16 h-16 bg-blue-100 text-blue-600 rounded-full flex items-center justify-center mx-auto mb-4 text-3xl">
+              👋
+            </div>
+            <h2 className="text-xl font-bold text-gray-800 mb-2">ようこそ！</h2>
+            <p className="text-sm text-gray-500">
+              アプリを利用する前に、<br />
+              あなたのニックネームを教えてください。
+            </p>
+          </div>
+
+          <form onSubmit={handleSaveUsername} className="space-y-4">
+            <div>
+              <label className="block text-xs font-bold text-gray-700 mb-1">
+                表示名 (ニックネーム) <span className="text-red-500">*</span>
+              </label>
+              <input
+                type="text"
+                required
+                placeholder="例: しずおか 太郎"
+                className="w-full p-3 border border-gray-300 rounded-xl focus:ring-2 focus:ring-blue-500 focus:outline-none bg-gray-50 text-base"
+                value={inputUsername}
+                onChange={(e) => setInputUsername(e.target.value)}
+              />
+              <p className="text-[10px] text-gray-400 mt-1 ml-1">
+                ※あとでプロフィール画面から変更できます
+              </p>
+            </div>
+
+            <button
+              type="submit"
+              disabled={!inputUsername.trim() || isSavingUsername}
+              className="w-full bg-blue-600 text-white py-3.5 rounded-xl font-bold shadow-lg hover:bg-blue-700 disabled:opacity-50 transition-all active:scale-95"
+            >
+              {isSavingUsername ? '登録中...' : '登録してはじめる'}
+            </button>
+          </form>
+        </div>
+      </div>
+    )
+  }
+  // ▲▲▲ 追加ここまで ▲▲▲
 
   return (
     <div className="min-h-[100dvh] bg-gray-50 font-sans text-gray-900 pb-24">
